@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams, useLocation, Link } from "react-router-dom";
+import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { fetchCatalog, formatTierLabel, groupByCatalog } from "../api/models";
 import type { CatalogGroup } from "../api/models";
 import type { ModelRule, AliasTarget } from "../types";
@@ -22,7 +22,13 @@ export default function ModelPick() {
 
   // Initial selection comes from router state (passed by KeyForm when it
   // navigates here). Edit-mode keys pass their current models in too.
-  const st = loc.state as { models?: ModelRule[]; currentTargets?: AliasTarget[]; returnTo?: string } | null;
+  const st = loc.state as {
+    models?: ModelRule[];
+    currentTargets?: AliasTarget[];
+    returnTo?: string;
+    /** Full alias form draft — forwarded back so name/dispatch/prices survive. */
+    draftAlias?: unknown;
+  } | null;
   // Context-aware: if a `returnTo` route is supplied (e.g. from the alias
   // editor), we are picking targets for a global alias, not models for a key.
   const aliasMode = !!st?.returnTo;
@@ -31,6 +37,7 @@ export default function ModelPick() {
   const backTo = aliasMode
     ? st!.returnTo!
     : (id ? `/keys/${encodeURIComponent(id)}/edit` : "/keys/new");
+  const draftAlias = st?.draftAlias;
 
   const [selected, setSelected] = useState<Set<string>>(() => {
     const s = new Set<string>();
@@ -146,16 +153,31 @@ export default function ModelPick() {
         if (r.group) t.group = r.group;
         return t;
       });
-      nav(backTo, { state: { pickedTargets: targets } });
+      nav(backTo, { state: { pickedTargets: targets, draftAlias } });
     } else {
       nav(backTo, { state: { pickedModels: rules } });
     }
   };
 
+  const goBack = () => {
+    // Preserve in-progress alias form fields even when canceling the picker.
+    if (aliasMode) {
+      nav(backTo, {
+        state: {
+          draftAlias,
+          // Keep previous targets if user backs out without confirming.
+          pickedTargets: initialTargets,
+        },
+      });
+      return;
+    }
+    nav(backTo);
+  };
+
   return (
     <div className="model-pick-page">
       <div className="mp-head">
-        <Link to={backTo} className="btn sm">{t("keyUsage.back")}</Link>
+        <button type="button" className="btn sm" onClick={goBack}>{t("keyUsage.back")}</button>
         <h1>{t("picker.title")}</h1>
         <button className="btn primary sm" onClick={finish} disabled={loading}>
           {t("picker.done", { count: selected.size })}
@@ -215,7 +237,7 @@ export default function ModelPick() {
       <div className="mp-footer">
         <span className="mp-count">{t("picker.selected", { count: selected.size })}</span>
         <div className="mp-btns">
-          <Link to={backTo} className="btn sm">{t("keyForm.cancel")}</Link>
+          <button type="button" className="btn sm" onClick={goBack}>{t("keyForm.cancel")}</button>
           <button className="btn primary sm" onClick={finish} disabled={loading}>
             {t("picker.done", { count: selected.size })}
           </button>

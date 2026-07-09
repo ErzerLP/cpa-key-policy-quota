@@ -336,6 +336,37 @@ function RuleCard({
 
 // --- Alias Edit Form ---
 
+// Survives ModelPick remounts (and React Strict Mode) better than router
+// state alone — without this, filling the alias name then picking targets
+// wipes the name when AliasEditForm remounts empty.
+const ALIAS_FORM_DRAFT_KEY = "cpa-key-policy:alias-form-draft";
+
+function readAliasFormDraft(): AliasMapping | null {
+  try {
+    const raw = sessionStorage.getItem(ALIAS_FORM_DRAFT_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as AliasMapping;
+  } catch {
+    return null;
+  }
+}
+
+function writeAliasFormDraft(draft: AliasMapping) {
+  try {
+    sessionStorage.setItem(ALIAS_FORM_DRAFT_KEY, JSON.stringify(draft));
+  } catch {
+    /* private mode / quota — router state is the fallback */
+  }
+}
+
+function clearAliasFormDraft() {
+  try {
+    sessionStorage.removeItem(ALIAS_FORM_DRAFT_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function AliasEditForm() {
   const t = useT();
   const nav = useNavigate();
@@ -343,41 +374,71 @@ export function AliasEditForm() {
   const loc = useLocation();
   const isNew = aliasName === "new" || !aliasName;
 
-  const [alias, setAlias] = useState<AliasMapping>({
-    alias: isNew ? "" : decodeURIComponent(aliasName),
-    targets: [],
-    dispatch: "round-robin",
-    billing_mode: "tokens",
-    input_price_per_million: 0,
-    output_price_per_million: 0,
-    cache_read_price_per_million: 0,
-    per_call_usd: 0,
+  const locState = loc.state as { draftAlias?: AliasMapping; pickedTargets?: AliasTarget[] } | null;
+  const returnDraft = locState?.draftAlias;
+  const returnTargets = locState?.pickedTargets;
+
+  const [alias, setAlias] = useState<AliasMapping>(() => {
+    const draft = returnDraft ?? readAliasFormDraft();
+    if (draft) {
+      return {
+        ...draft,
+        targets: returnTargets ?? draft.targets ?? [],
+      };
+    }
+    return {
+      alias: isNew ? "" : decodeURIComponent(aliasName ?? ""),
+      targets: [],
+      dispatch: "round-robin",
+      billing_mode: "tokens",
+      input_price_per_million: 0,
+      output_price_per_million: 0,
+      cache_read_price_per_million: 0,
+      per_call_usd: 0,
+    };
   });
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // Load existing alias if editing.
+  // Keep session draft in sync while editing so a picker trip never loses fields.
+  useEffect(() => {
+    writeAliasFormDraft(alias);
+  }, [alias]);
+
+  // Load existing alias if editing — skip when this form already has a draft
+  // for the same alias (picker return / in-progress edit).
   useEffect(() => {
     if (isNew) return;
+    if (returnDraft) return;
+    const name = decodeURIComponent(aliasName ?? "");
+    const session = readAliasFormDraft();
+    if (session && session.alias === name) return;
     void fetchAliases().then((list) => {
-      const found = list.find((a) => a.alias === decodeURIComponent(aliasName));
+      const found = list.find((a) => a.alias === name);
       if (found) setAlias(found);
     }).catch((e: unknown) => setError(String(e)));
-  }, [aliasName, isNew]);
+  }, [aliasName, isNew, returnDraft]);
 
-  // Pick up targets from ModelPick router state.
+  // Apply targets returned from ModelPick (draft fields come from session/router).
   useEffect(() => {
-    if (loc.state?.pickedTargets) {
-      setAlias((prev) => ({ ...prev, targets: loc.state.pickedTargets as AliasTarget[] }));
-    }
-  }, [loc.state]);
+    if (!returnTargets) return;
+    setAlias((prev) => {
+      const base = returnDraft ?? prev;
+      return { ...base, targets: returnTargets };
+    });
+  }, [returnTargets, returnDraft]);
+
+  const leaveForm = (toMapping = true) => {
+    clearAliasFormDraft();
+    if (toMapping) nav("/mapping", { state: { mappingTab: "alias" } });
+  };
 
   const handleSave = async () => {
     setSaving(true);
     setError("");
     try {
       await upsertAlias(alias);
-      nav("/mapping", { state: { mappingTab: "alias" } });
+      leaveForm(true);
     } catch (e: unknown) {
       setError(String(e));
     } finally {
@@ -386,10 +447,16 @@ export function AliasEditForm() {
   };
 
   const addTarget = () => {
-    // Navigate to the alias-target picker. It returns with `pickedTargets`
-    // in router state and the `returnTo` URL so it knows to route back here.
-    const here = `/mapping/alias/${isNew ? "new" : encodeURIComponent(alias.alias)}`;
-    nav("/mapping/pick-target", { state: { returnTo: here, currentTargets: alias.targets } });
+    // Persist draft before leaving so name/dispatch/pricing survive the picker.
+    writeAliasFormDraft(alias);
+    const here = `/mapping/alias/${isNew ? "new" : encodeURIComponent(alias.alias || aliasName || "new")}`;
+    nav("/mapping/pick-target", {
+      state: {
+        returnTo: here,
+        currentTargets: alias.targets,
+        draftAlias: alias,
+      },
+    });
   };
 
   const removeTarget = (idx: number) => {
@@ -400,7 +467,7 @@ export function AliasEditForm() {
     <div className="map-form-page">
       <div className="map-form-card">
         <div className="map-form-head">
-          <a className="back-link" onClick={() => nav("/mapping", { state: { mappingTab: "alias" } })}>
+          <a className="back-link" onClick={() => leaveForm(true)}>
             ← {t("mapping.back")}
           </a>
           <h1>{isNew ? t("mapping.alias.newTitle") : t("mapping.alias.editTitle")}</h1>
@@ -417,29 +484,23 @@ export function AliasEditForm() {
         </div>
         <div className="map-form-row">
           <label>{t("mapping.alias.dispatch")}</label>
-          <div className="map-form-radio-group">
-            <div className="map-form-radio">
-              <label>
-                <input
-                  type="radio"
-                  checked={alias.dispatch === "round-robin"}
-                  onChange={() => setAlias({ ...alias, dispatch: "round-robin" })}
-                />
-                {t("mapping.alias.roundRobin")}
-              </label>
-              <span className="map-form-radio-desc">{t("mapping.alias.roundRobinDesc")}</span>
-            </div>
-            <div className="map-form-radio">
-              <label>
-                <input
-                  type="radio"
-                  checked={alias.dispatch === "priority"}
-                  onChange={() => setAlias({ ...alias, dispatch: "priority" })}
-                />
-                {t("mapping.alias.priority")}
-              </label>
-              <span className="map-form-radio-desc">{t("mapping.alias.priorityDesc")}</span>
-            </div>
+          <div className="map-dispatch-seg" role="group" aria-label={t("mapping.alias.dispatch")}>
+            <button
+              type="button"
+              className={"map-dispatch-btn" + (alias.dispatch === "round-robin" ? " active" : "")}
+              onClick={() => setAlias({ ...alias, dispatch: "round-robin" })}
+            >
+              <span className="map-dispatch-title">{t("mapping.alias.roundRobin")}</span>
+              <span className="map-dispatch-desc">{t("mapping.alias.roundRobinDesc")}</span>
+            </button>
+            <button
+              type="button"
+              className={"map-dispatch-btn" + (alias.dispatch === "priority" ? " active" : "")}
+              onClick={() => setAlias({ ...alias, dispatch: "priority" })}
+            >
+              <span className="map-dispatch-title">{t("mapping.alias.priority")}</span>
+              <span className="map-dispatch-desc">{t("mapping.alias.priorityDesc")}</span>
+            </button>
           </div>
         </div>
         <div className="map-form-row">
@@ -516,7 +577,7 @@ export function AliasEditForm() {
           <button className="btn primary" onClick={handleSave} disabled={saving}>
             {saving ? "..." : t("mapping.save")}
           </button>
-          <button className="btn" onClick={() => nav("/mapping", { state: { mappingTab: "alias" } })}>
+          <button className="btn" onClick={() => leaveForm(true)}>
             {t("mapping.cancel")}
           </button>
         </div>

@@ -999,6 +999,52 @@ td.strong { font-weight: 600; color: var(--text); }
 .map-form-radio { display: flex; flex-direction: column; gap: 2px; }
 .map-form-radio label { font-size: 14px; font-weight: 500; }
 .map-form-radio-desc { font-size: 12px; color: var(--muted); }
+
+/* Dispatch mode: card-style segmented control (replaces bare radios). */
+.map-dispatch-seg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.map-dispatch-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  text-align: left;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel, var(--card));
+  color: var(--text);
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color var(--t-fast, .15s), background var(--t-fast, .15s), box-shadow var(--t-fast, .15s);
+}
+.map-dispatch-btn:hover {
+  border-color: var(--border-hover, var(--border-strong, var(--border)));
+  background: var(--row-hover, var(--secondary-bg, var(--muted-bg)));
+}
+.map-dispatch-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-soft, rgba(139, 134, 128, .12));
+  box-shadow: 0 0 0 3px var(--accent-ring, rgba(139, 134, 128, .18));
+}
+.map-dispatch-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.map-dispatch-btn.active .map-dispatch-title { color: var(--text); }
+.map-dispatch-desc {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+  font-weight: 400;
+}
+@media (max-width: 640px) {
+  .map-dispatch-seg { grid-template-columns: 1fr; }
+}
 .map-form-targets { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
 .map-form-target-row {
   display: flex; align-items: center; gap: 8px; padding: 6px 12px;
