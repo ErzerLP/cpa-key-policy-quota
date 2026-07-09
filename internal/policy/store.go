@@ -32,10 +32,30 @@ type Store struct {
 	// rrCounters tracks round-robin position per alias name (global, shared
 	// across all keys). Reset on Configure/UpsertKey when aliases change.
 	rrCounters map[string]int
+	// pendingPicks remembers the multi-target selection made at Authenticate
+	// so Route (and the group stamped into scheduler metadata) use the same
+	// target for the same request. Without this, round-robin would advance
+	// twice (auth + route) and the scheduler could filter by the wrong group.
+	// Keyed by lower(keyID)+"\0"+lower(alias); FIFO queue per key.
+	pendingPicks map[string][]pendingPick
 	// onClassifyRulesChanged is called when classify rules change, so the
 	// plugin can clear its classify cache. Set by the plugin App.
 	onClassifyRulesChanged func()
 }
+
+// pendingPick is one Authenticate-time target selection waiting for Route.
+type pendingPick struct {
+	rule ModelRule
+	at   time.Time
+}
+
+// pendingPickTTL drops orphaned selections when the host never called Route
+// (e.g. rejected after auth). Long enough for normal request setup, short
+// enough not to pin stale groups across unrelated traffic.
+const pendingPickTTL = 30 * time.Second
+
+// pendingPickMaxQueue caps how many unconsumed picks we keep per (key,alias).
+const pendingPickMaxQueue = 32
 
 type AuthDecision struct {
 	Known       bool
@@ -58,11 +78,12 @@ type AuthDecision struct {
 
 func NewStore() *Store {
 	return &Store{
-		enabled:   DefaultConfig().Enabled,
-		keys:      make(map[string]*KeyConfig),
-		limiter:   NewRateLimiter(),
-		usage:     newUsageLedger(time.Now),
-		rrCounters: make(map[string]int),
+		enabled:      DefaultConfig().Enabled,
+		keys:         make(map[string]*KeyConfig),
+		limiter:      NewRateLimiter(),
+		usage:        newUsageLedger(time.Now),
+		rrCounters:   make(map[string]int),
+		pendingPicks: make(map[string][]pendingPick),
 	}
 }
 
@@ -264,7 +285,11 @@ func (s *Store) Authenticate(method, path string, headers http.Header, query map
 	requested := ExtractRequestedModel(path, query, body)
 	decision.Requested = requested
 	if requested != "" {
-		rule, ok := key.ModelForAlias(requested)
+		// Must use the same multi-target selection as Route (priority /
+		// round-robin), not ModelForAlias which always returns the first
+		// match. Otherwise metadata["group"] can pin the wrong tier while
+		// model.route forwards a different target.
+		rule, ok := s.resolveRuleForAlias(key, requested)
 		if !ok {
 			decision.Reason = "model_not_allowed"
 			return decision
@@ -289,6 +314,13 @@ func (s *Store) Authenticate(method, path string, headers http.Header, query map
 	}
 	decision.Allowed = true
 	decision.Reason = "allowed"
+
+	// Remember this request's selected target so Route reuses it (same group /
+	// provider / model). Only stash when the request is actually allowed — a
+	// rate/cost-limited request never reaches model.route.
+	if requested != "" {
+		s.rememberPick(key.ID, requested, decision.Rule)
+	}
 
 	// Per-call image/video pre-charge workaround. CPA's XAI executor does not
 	// emit usage records for /v1/images/* and /v1/videos/* (executeImages and
@@ -323,6 +355,12 @@ func (s *Store) Route(headers http.Header, query map[string][]string, requested 
 	if key == nil || !key.Enabled {
 		return ModelRule{}, "", false
 	}
+	// Prefer the selection Authenticate already made for this request so the
+	// routed provider/model and the group stamped into scheduler metadata stay
+	// aligned (critical for multi-target aliases with different groups).
+	if rule, ok := s.takePick(key.ID, requested); ok {
+		return rule, key.ID, true
+	}
 	rule, ok := s.resolveRuleForAlias(key, requested)
 	if !ok {
 		return ModelRule{}, key.ID, false
@@ -349,18 +387,88 @@ func (s *Store) resolveRuleForAlias(key *KeyConfig, requested string) (ModelRule
 	if len(matches) == 1 {
 		return matches[0], true
 	}
-	// Multiple targets: check the global alias's dispatch mode.
-	alias := s.aliases[strings.ToLower(requested)]
+	// Multiple targets: dispatch mode + RR counter need the store lock.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	aliasName := strings.ToLower(strings.TrimSpace(requested))
+	alias := s.aliases[aliasName]
 	if alias != nil && strings.EqualFold(alias.Dispatch, "priority") {
 		return matches[0], true // static priority: always first
 	}
 	// Round-robin (default): rotate using a global counter.
-	idx := s.rrCounters[strings.ToLower(requested)]
+	idx := s.rrCounters[aliasName]
 	if idx >= len(matches) {
 		idx = 0
 	}
-	s.rrCounters[strings.ToLower(requested)] = (idx + 1) % len(matches)
+	s.rrCounters[aliasName] = (idx + 1) % len(matches)
 	return matches[idx], true
+}
+
+func pendingPickKey(keyID, alias string) string {
+	return strings.ToLower(strings.TrimSpace(keyID)) + "\x00" + strings.ToLower(strings.TrimSpace(alias))
+}
+
+// rememberPick stores Authenticate's selected rule for a later Route call.
+func (s *Store) rememberPick(keyID, alias string, rule ModelRule) {
+	if strings.TrimSpace(keyID) == "" || strings.TrimSpace(alias) == "" {
+		return
+	}
+	k := pendingPickKey(keyID, alias)
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pendingPicks == nil {
+		s.pendingPicks = make(map[string][]pendingPick)
+	}
+	q := s.prunePendingLocked(s.pendingPicks[k], now)
+	q = append(q, pendingPick{rule: rule, at: now})
+	if len(q) > pendingPickMaxQueue {
+		q = q[len(q)-pendingPickMaxQueue:]
+	}
+	s.pendingPicks[k] = q
+}
+
+// takePick consumes the oldest non-expired selection for this key+alias.
+// Returns false when nothing is pending (Route-only callers / tests).
+func (s *Store) takePick(keyID, alias string) (ModelRule, bool) {
+	if strings.TrimSpace(keyID) == "" || strings.TrimSpace(alias) == "" {
+		return ModelRule{}, false
+	}
+	k := pendingPickKey(keyID, alias)
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	q := s.prunePendingLocked(s.pendingPicks[k], now)
+	if len(q) == 0 {
+		delete(s.pendingPicks, k)
+		return ModelRule{}, false
+	}
+	pick := q[0]
+	q = q[1:]
+	if len(q) == 0 {
+		delete(s.pendingPicks, k)
+	} else {
+		s.pendingPicks[k] = q
+	}
+	return pick.rule, true
+}
+
+// prunePendingLocked drops expired entries. Caller must hold s.mu.
+func (s *Store) prunePendingLocked(q []pendingPick, now time.Time) []pendingPick {
+	if len(q) == 0 {
+		return q
+	}
+	i := 0
+	for i < len(q) && now.Sub(q[i].at) > pendingPickTTL {
+		i++
+	}
+	if i == 0 {
+		return q
+	}
+	if i >= len(q) {
+		return nil
+	}
+	return q[i:]
 }
 
 func (s *Store) ResponseAlias(headers http.Header, query map[string][]string, requested string) (string, bool) {

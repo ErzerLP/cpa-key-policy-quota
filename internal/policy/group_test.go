@@ -106,3 +106,138 @@ func TestAuthenticateSurfacesGroup(t *testing.T) {
 		t.Fatalf("expected group surfaced on decision, got %q", dec.Rule.Group)
 	}
 }
+
+// Multi-target aliases with different groups must surface the SAME group on
+// Authenticate and Route for one request. Previously Authenticate used
+// ModelForAlias (always first match) while Route advanced round-robin, so the
+// scheduler could filter by free while the router forwarded the team target.
+func TestAuthenticateAndRouteShareMultiTargetGroup(t *testing.T) {
+	store := NewStore()
+	plain := "multi-group-key"
+	hash, err := HashKey(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Configure(Config{
+		Enabled:   true,
+		StateFile: filepath.Join(t.TempDir(), "state.json"),
+		Aliases: []AliasMapping{{
+			Alias:    "mixed",
+			Dispatch: "round-robin",
+			Targets: []AliasTarget{
+				{Provider: "codex", TargetModel: "gpt-5.4-mini", Group: "free"},
+				{Provider: "codex", TargetModel: "gpt-5.4-mini", Group: "team"},
+				{Provider: "codex", TargetModel: "gpt-5.4-mini", Group: "plus"},
+			},
+			BillingMode: "tokens",
+		}},
+		Keys: []KeyConfig{{
+			ID: "k", Enabled: true, KeyHash: hash,
+			Aliases: []KeyAliasRef{{Alias: "mixed"}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hdr := http.Header{"Authorization": {"Bearer " + plain}}
+	body := []byte(`{"model":"mixed"}`)
+
+	seenGroups := map[string]int{}
+	for i := 0; i < 6; i++ {
+		dec := store.Authenticate("POST", "/v1/chat/completions", hdr, nil, body)
+		if !dec.Allowed {
+			t.Fatalf("auth %d: expected allowed, got %+v", i, dec)
+		}
+		rule, keyID, ok := store.Route(hdr, nil, "mixed")
+		if !ok || keyID != "k" {
+			t.Fatalf("route %d: expected ok key=k, got ok=%v key=%q", i, ok, keyID)
+		}
+		if rule.Group != dec.Rule.Group {
+			t.Fatalf("call %d: auth group %q != route group %q (provider=%s model=%s)",
+				i, dec.Rule.Group, rule.Group, rule.Provider, rule.TargetModel)
+		}
+		if rule.Provider != dec.Rule.Provider || rule.TargetModel != dec.Rule.TargetModel {
+			t.Fatalf("call %d: auth target %+v != route target %+v", i, dec.Rule, rule)
+		}
+		seenGroups[rule.Group]++
+	}
+	// Round-robin across 3 groups × 2 cycles should hit every group.
+	for _, g := range []string{"free", "team", "plus"} {
+		if seenGroups[g] == 0 {
+			t.Fatalf("expected round-robin to hit group %q, got %v", g, seenGroups)
+		}
+	}
+}
+
+// Priority multi-target always pins the first target's group on both auth and route.
+func TestAuthenticateAndRoutePriorityKeepsFirstGroup(t *testing.T) {
+	store := NewStore()
+	plain := "prio-group-key"
+	hash, err := HashKey(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Configure(Config{
+		Enabled:   true,
+		StateFile: filepath.Join(t.TempDir(), "state.json"),
+		Aliases: []AliasMapping{{
+			Alias:    "prio",
+			Dispatch: "priority",
+			Targets: []AliasTarget{
+				{Provider: "codex", TargetModel: "gpt-5.4-mini", Group: "team"},
+				{Provider: "codex", TargetModel: "gpt-5.4-mini", Group: "free"},
+			},
+			BillingMode: "tokens",
+		}},
+		Keys: []KeyConfig{{
+			ID: "k", Enabled: true, KeyHash: hash,
+			Aliases: []KeyAliasRef{{Alias: "prio"}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hdr := http.Header{"Authorization": {"Bearer " + plain}}
+	for i := 0; i < 3; i++ {
+		dec := store.Authenticate("POST", "/v1/chat/completions", hdr, nil, []byte(`{"model":"prio"}`))
+		if !dec.Allowed || dec.Rule.Group != "team" {
+			t.Fatalf("auth %d: want team, got %+v", i, dec)
+		}
+		rule, _, ok := store.Route(hdr, nil, "prio")
+		if !ok || rule.Group != "team" {
+			t.Fatalf("route %d: want team, got %+v", i, rule)
+		}
+	}
+}
+
+// Route-only callers (no prior Authenticate) still resolve multi-target aliases.
+func TestRouteWithoutAuthenticateStillResolves(t *testing.T) {
+	store := NewStore()
+	plain := "route-only-key"
+	hash, err := HashKey(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Configure(Config{
+		Enabled:   true,
+		StateFile: filepath.Join(t.TempDir(), "state.json"),
+		Aliases: []AliasMapping{{
+			Alias:    "solo",
+			Dispatch: "round-robin",
+			Targets: []AliasTarget{
+				{Provider: "codex", TargetModel: "gpt-5.4-mini", Group: "free"},
+				{Provider: "codex", TargetModel: "gpt-5.4-mini", Group: "team"},
+			},
+		}},
+		Keys: []KeyConfig{{
+			ID: "k", Enabled: true, KeyHash: hash,
+			Aliases: []KeyAliasRef{{Alias: "solo"}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hdr := http.Header{"Authorization": {"Bearer " + plain}}
+	rule, _, ok := store.Route(hdr, nil, "solo")
+	if !ok || rule.Group == "" {
+		t.Fatalf("expected route-only multi-target resolve, got ok=%v rule=%+v", ok, rule)
+	}
+}
