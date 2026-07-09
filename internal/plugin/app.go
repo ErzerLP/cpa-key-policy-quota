@@ -370,13 +370,17 @@ func (a *App) candidateGroups(cand SchedulerAuthCandidate) []string {
 
 	var groups []string
 	// 1. Evaluate custom classify rules (multi-group: collect all matches).
+	// Group names are stored bare on the rule but stamped/matched with the
+	// classify: prefix so they never collide with built-in plan_type values.
 	for _, rule := range a.store.ClassifyRulesSnapshot() {
 		if !rule.Enabled || rule.Compiled() == nil {
 			continue
 		}
 		val := candidateFieldValue(cand, rule.Field)
 		if val != "" && rule.Compiled().MatchString(val) {
-			groups = append(groups, strings.ToLower(rule.Group))
+			if g := policy.FormatClassifyGroup(rule.Group); g != "" {
+				groups = append(groups, g)
+			}
 		}
 	}
 	// 2. If no custom rule matched, fall back to built-in plan_type/tier.
@@ -517,6 +521,7 @@ func (a *App) managementRegistration() ManagementRegistrationResponse {
 			{Method: http.MethodDelete, Path: base + "/classify-rules", Description: "Delete a classification rule by name."},
 			{Method: http.MethodPost, Path: base + "/classify-rules/reorder", Description: "Reorder classification rules."},
 			{Method: http.MethodPost, Path: base + "/classify-preview", Description: "Preview credential classification results for given descriptors."},
+			{Method: http.MethodPost, Path: base + "/catalog", Description: "Build auth-file model picker catalog with classify + built-in groups."},
 		},
 		Resources: []ResourceRoute{
 			{Path: web.IndexPath, Menu: "Key Policy", Description: "Web UI for managing downstream CPA key policies (create keys, pick models)."},
@@ -573,6 +578,8 @@ func (a *App) handleManagement(raw []byte) ([]byte, error) {
 		return OKEnvelope(a.reorderClassifyRules(req.Body))
 	case req.Method == http.MethodPost && path == base+"/classify-preview":
 		return OKEnvelope(a.classifyPreview(req.Body))
+	case req.Method == http.MethodPost && path == base+"/catalog":
+		return OKEnvelope(a.buildCatalog(req.Body))
 	default:
 		return OKEnvelope(jsonError(http.StatusNotFound, "not_found", "unknown management route"))
 	}

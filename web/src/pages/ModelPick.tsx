@@ -1,20 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useLocation, Link } from "react-router-dom";
-import { fetchCatalog, groupByCatalog } from "../api/models";
+import { fetchCatalog, formatTierLabel, groupByCatalog } from "../api/models";
 import type { CatalogGroup } from "../api/models";
 import type { ModelRule, AliasTarget } from "../types";
 import { useT } from "../i18n";
-
-// Tier label: known tiers get a localized name; anything unrecognized falls
-// back to the raw string. Mirrors the inline ModelPicker's tierLabel.
-function tierLabel(
-  t: (k: string, v?: Record<string, string | number>) => string,
-  group: string,
-): string {
-  const key = "picker.tier." + group;
-  const translated = t(key);
-  return translated === key ? group : translated;
-}
 
 // Selection key: "provider|group|model" (all lowercased for dedupe matching).
 function keyOf(g: CatalogGroup, model: string): string {
@@ -193,7 +182,7 @@ export default function ModelPick() {
           <div className="muted">{t("picker.noMatch")}</div>
         ) : (
           filtered.map((g) => {
-            const groupLabel = g.group ? tierLabel(t, g.group) : "";
+            const groupLabel = g.group ? formatTierLabel(t, g.group) : "";
             const head = g.provider + (groupLabel ? " · " + groupLabel : "");
             const allSelected = g.models.every((m) => selected.has(keyOf(g, m)));
             return (

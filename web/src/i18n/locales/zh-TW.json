@@ -130,7 +130,8 @@
       "pro": "Pro",
       "enterprise": "Enterprise",
       "supported": "無檔位標識",
-      "free-tier": "免費檔"
+      "free-tier": "免費檔",
+      "classify": "自訂 · {{name}}"
     }
   },
   "plainModal": {

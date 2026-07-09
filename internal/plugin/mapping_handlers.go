@@ -241,3 +241,36 @@ func descriptorBuiltInGroup(desc credentialDescriptor) string {
 	}
 	return "supported"
 }
+
+// --- Catalog builder (POST /catalog) ---
+
+// catalogRequest is the body for POST /catalog. The frontend gathers auth-file
+// descriptors + per-file models (the plugin cannot list host auth-files itself)
+// and the plugin applies classify rules + built-in tiering to produce picker
+// entries with classify:-prefixed custom groups.
+type catalogRequest struct {
+	Credentials []policy.CatalogCredential `json:"credentials"`
+	// Rules optionally override the store's classify rules (for dry-run
+	// previews). Empty → use currently configured rules.
+	Rules []policy.ClassifyRule `json:"rules,omitempty"`
+}
+
+type catalogResponse struct {
+	Entries []policy.CatalogEntry `json:"entries"`
+}
+
+func (a *App) buildCatalog(raw []byte) ManagementResponse {
+	var req catalogRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return jsonError(http.StatusBadRequest, "bad_request", err.Error())
+	}
+	rules := req.Rules
+	if len(rules) == 0 {
+		rules = a.store.ClassifyRulesSnapshot()
+	}
+	entries := policy.BuildCatalogEntries(req.Credentials, rules)
+	if entries == nil {
+		entries = []policy.CatalogEntry{}
+	}
+	return jsonResponse(http.StatusOK, catalogResponse{Entries: entries})
+}

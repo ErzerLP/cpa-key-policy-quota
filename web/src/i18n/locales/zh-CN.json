@@ -139,7 +139,8 @@
       "pro": "Pro",
       "enterprise": "Enterprise",
       "supported": "无档位标识",
-      "free-tier": "免费档"
+      "free-tier": "免费档",
+      "classify": "自定义 · {{name}}"
     }
   },
   "plainModal": {

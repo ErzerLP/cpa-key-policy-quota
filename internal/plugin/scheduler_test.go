@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 )
 
@@ -141,6 +142,62 @@ func TestSchedulerPickSupportedMatchesUntieredOnly(t *testing.T) {
 	}
 	if !resp.Handled || resp.AuthID != "codex-no-claim" {
 		t.Fatalf("expected untiered pick, got %+v", resp)
+	}
+}
+
+// Custom classify groups are matched with the classify: prefix so they never
+// collide with built-in plan_type values like "free".
+func TestSchedulerPickMatchesClassifyPrefix(t *testing.T) {
+	app := NewApp()
+	yaml := []byte(`
+enabled: true
+state_file: "` + filepath.ToSlash(filepath.Join(t.TempDir(), "state.json")) + `"
+classify_rules:
+  - name: vip-files
+    field: filename
+    pattern: "vip"
+    group: vip
+    enabled: true
+keys: []
+`)
+	reqCfg, _ := json.Marshal(LifecycleRequest{ConfigYAML: yaml})
+	if _, err := app.HandleMethod(MethodPluginReconfigure, reqCfg); err != nil {
+		t.Fatal(err)
+	}
+	req, _ := json.Marshal(SchedulerPickRequest{
+		Provider: "codex",
+		Options:  SchedulerPickOptions{Metadata: map[string]any{"group": "classify:vip"}},
+		Candidates: []SchedulerAuthCandidate{
+			{ID: "free-user.json", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+			{ID: "vip-user.json", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+		},
+	})
+	raw, err := app.HandleMethod(MethodSchedulerPick, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp SchedulerPickResponse
+	if err := unmarshalOK(raw, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Handled || resp.AuthID != "vip-user.json" {
+		t.Fatalf("expected vip-user via classify:vip, got %+v", resp)
+	}
+
+	// Bare "vip" (no prefix) must NOT match — isolation from unprefixed names.
+	req2, _ := json.Marshal(SchedulerPickRequest{
+		Options: SchedulerPickOptions{Metadata: map[string]any{"group": "vip"}},
+		Candidates: []SchedulerAuthCandidate{
+			{ID: "vip-user.json", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+		},
+	})
+	raw2, _ := app.HandleMethod(MethodSchedulerPick, req2)
+	var resp2 SchedulerPickResponse
+	if err := unmarshalOK(raw2, &resp2); err != nil {
+		t.Fatal(err)
+	}
+	if !resp2.Handled || resp2.AuthID != "" {
+		t.Fatalf("bare vip must not match classify group, got %+v", resp2)
 	}
 }
 

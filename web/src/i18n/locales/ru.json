@@ -139,7 +139,8 @@
       "pro": "Pro",
       "enterprise": "Enterprise",
       "supported": "Без тира",
-      "free-tier": "Бесплатный тир"
+      "free-tier": "Бесплатный тир",
+      "classify": "Свой · {{name}}"
     }
   },
   "plainModal": {

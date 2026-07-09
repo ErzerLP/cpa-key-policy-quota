@@ -5,6 +5,7 @@ import type { KeyPublic, ModelRule, AliasMapping } from "../types";
 import ModelPicker from "./ModelPicker";
 import { getPriceTable, lookupPrice, type PriceTable } from "../store/modelPrices";
 import { fetchAliases } from "../api/mappings";
+import { formatTierLabel } from "../api/models";
 import { useT } from "../i18n";
 
 export interface KeyFormValues {
@@ -324,7 +325,9 @@ export default function KeyForm({
     const isMulti = sameKey.length > 1;
       const providersUnion = Array.from(new Set(sameKey.map((x) => x.provider))).join(", ");
       const groupsUnionRaw = Array.from(new Set(sameKey.map((x) => (x.group ?? "").trim()).filter(Boolean)));
-      const groupsUnion = groupsUnionRaw.length ? groupsUnionRaw.join(", ") : "—";
+      const groupsUnion = groupsUnionRaw.length
+        ? groupsUnionRaw.map((g) => formatTierLabel(t, g)).join(", ")
+        : "—";
     const row = prices[key] ?? {
       input_price_per_million: 0,
       output_price_per_million: 0,
@@ -429,7 +432,7 @@ export default function KeyForm({
         <tr>
           <td className="mono">{m.alias}{isMulti ? ` (${sameKey.length})` : ""}</td>
           <td className="muted">{isMulti ? providersUnion : m.provider}</td>
-          <td className="muted">{isMulti ? groupsUnion : (m.group ?? "—")}</td>
+          <td className="muted">{isMulti ? groupsUnion : (m.group ? formatTierLabel(t, m.group) : "—")}</td>
           <td>
             <label className="switch" title={t("keyForm.billingModeTitle")}>
               <input
@@ -638,7 +641,7 @@ export default function KeyForm({
                 {models.length === 0 && <span className="mc-empty">{t("keyForm.modelsEmpty")}</span>}
                 {models.map((m) => (
                   <span key={priceKey(m)} className="mc-chip">
-                    {m.alias}{m.group ? " · " + m.group : ""}
+                    {m.alias}{m.group ? " · " + formatTierLabel(t, m.group) : ""}
                     <button type="button" className="mc-x" onClick={() => {
                       setModels((prev) => prev.filter((x) => priceKey(x) !== priceKey(m)));
                     }} aria-label={t("keyForm.removeModel")}>×</button>
@@ -670,7 +673,7 @@ export default function KeyForm({
                       <div>
                         <div className="kf-model-alias">{m.alias}</div>
                         <div className="muted kf-model-meta">
-                          {m.provider}{m.group ? ` · ${m.group}` : ""}
+                          {m.provider}{m.group ? ` · ${formatTierLabel(t, m.group)}` : ""}
                         </div>
                         <div className="mono kf-model-target">{m.target_model}</div>
                       </div>

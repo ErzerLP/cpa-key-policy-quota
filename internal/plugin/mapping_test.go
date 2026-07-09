@@ -151,9 +151,9 @@ func TestSchedulerCustomClassifyRule(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A candidate with plan_type=team should be in "custom-team" (from custom rule)
-	// AND NOT in "team" (custom rule overrides built-in — custom matches first,
-	// so built-in doesn't run).
+	// A candidate with plan_type=team should be in "classify:custom-team"
+	// (custom rule group names are prefixed so they never collide with built-in
+	// plan_type values) AND NOT in bare "team" (custom match skips built-in).
 	cand := SchedulerAuthCandidate{
 		ID:         "codex-team-001",
 		Provider:   "codex",
@@ -165,12 +165,12 @@ func TestSchedulerCustomClassifyRule(t *testing.T) {
 	for _, g := range groups {
 		found[g] = true
 	}
-	if !found["custom-team"] {
-		t.Fatalf("expected 'custom-team' group, got %v", groups)
+	if !found["classify:custom-team"] {
+		t.Fatalf("expected 'classify:custom-team' group, got %v", groups)
 	}
-	// Built-in "team" should NOT appear because custom rule matched first
-	// (multi-group means we collect all custom matches; if any custom matched,
-	// built-in is skipped).
+	if found["custom-team"] {
+		t.Fatalf("bare custom-team must not appear (needs classify: prefix), got %v", groups)
+	}
 	if found["team"] {
 		t.Fatalf("built-in 'team' should not appear when custom rule matched, got %v", groups)
 	}

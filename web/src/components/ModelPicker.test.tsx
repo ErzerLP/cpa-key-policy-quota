@@ -19,6 +19,7 @@ interface FakeGroup {
 
 vi.mock("../api/models", () => ({
   fetchCatalog: vi.fn(),
+  formatTierLabel: (_t: (k: string) => string, group: string) => group,
   groupByCatalog: (catalog: { provider: string; model: string; group?: string }[]): FakeGroup[] => {
     const map = new Map<string, FakeGroup>();
     for (const c of catalog) {

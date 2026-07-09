@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { fetchCatalog, groupByCatalog } from "../api/models";
+import { fetchCatalog, formatTierLabel, groupByCatalog } from "../api/models";
 import type { CatalogGroup } from "../api/models";
 import type { ModelRule } from "../types";
 import { useT } from "../i18n";
@@ -13,22 +13,9 @@ interface Props {
 
 // Multi-select picker over CPA's available models, grouped by provider and —
 // for providers whose auth files carry a tier/plan identity (codex, antigravity)
-// — further split into tier subgroups (codex · free / team / supported…).
-// Selecting a model under a tier pins that tier into the ModelRule's `group`,
-// which the plugin Scheduler honors at runtime so the request only lands on an
-// auth file of that tier. The same model may appear under several tiers as
-// distinct selectable rows. Non-tiered providers render as a flat group.
-// Render a tier/plan group label. Known tiers get a localized display name;
-// anything unrecognized (a future plan_type value) falls back to the raw
-// string so the user still sees something meaningful rather than a key path.
-function tierLabel(
-  t: (k: string, v?: Record<string, string | number>) => string,
-  group: string,
-): string {
-  const key = "picker.tier." + group;
-  const translated = t(key);
-  return translated === key ? group : translated;
-}
+// or a custom classify group — further split into subgroups (codex · free /
+// 自定义 · vip …). Selecting a model under a group pins that group into the
+// ModelRule, which the plugin Scheduler honors at runtime.
 
 export default function ModelPicker({ initial, onChange }: Props) {
   const t = useT();
@@ -185,7 +172,7 @@ export default function ModelPicker({ initial, onChange }: Props) {
         {t("picker.selected", { count: selected.size })}
       </div>
       {filtered.map((g) => {
-        const groupLabel = g.group ? tierLabel(t, g.group) : "";
+        const groupLabel = g.group ? formatTierLabel(t, g.group) : "";
         const head = g.provider + (groupLabel ? " · " + groupLabel : "");
         const allSelected = g.models.every((m) => selected.has(keyOf(g, m)));
         return (

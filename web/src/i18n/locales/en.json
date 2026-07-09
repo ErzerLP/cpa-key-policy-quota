@@ -139,7 +139,8 @@
       "pro": "Pro",
       "enterprise": "Enterprise",
       "supported": "Untiered",
-      "free-tier": "Free tier"
+      "free-tier": "Free tier",
+      "classify": "Custom · {{name}}"
     }
   },
   "plainModal": {

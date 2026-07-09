@@ -4,6 +4,9 @@ import {
   groupByCatalog,
   readPlanType,
   filterByConfigured,
+  isClassifyGroup,
+  formatTierLabel,
+  CLASSIFY_GROUP_PREFIX,
 } from "./models";
 
 describe("normalizeCatalog", () => {
@@ -328,3 +331,35 @@ describe("filterByConfigured", () => {
     expect(out.map((e) => e.provider)).toEqual(["opencode"]);
   });
 });
+
+describe("classify group labels", () => {
+  it("detects classify: prefix", () => {
+    expect(isClassifyGroup("classify:vip")).toBe(true);
+    expect(isClassifyGroup("CLASSIFY:vip")).toBe(true);
+    expect(isClassifyGroup("free")).toBe(false);
+    expect(isClassifyGroup("")).toBe(false);
+    expect(isClassifyGroup(undefined)).toBe(false);
+  });
+
+  it("formats custom groups via i18n key", () => {
+    const t = (k: string, v?: Record<string, string | number>) => {
+      if (k === "picker.tier.classify") return `Custom · ${v?.name}`;
+      if (k === "picker.tier.free") return "Free tier";
+      return k;
+    };
+    expect(formatTierLabel(t, "classify:vip")).toBe("Custom · vip");
+    expect(formatTierLabel(t, "free")).toBe("Free tier");
+    expect(formatTierLabel(t, "unknown-tier")).toBe("unknown-tier");
+  });
+
+  it("keeps classify:free distinct from built-in free", () => {
+    const catalog = normalizeCatalog([
+      { provider: "codex", group: "free", models: ["gpt-5.4-mini"] },
+      { provider: "codex", group: `${CLASSIFY_GROUP_PREFIX}free`, models: ["gpt-5.4-mini"] },
+    ]);
+    expect(catalog).toHaveLength(2);
+    const groups = groupByCatalog(catalog);
+    expect(groups.map((g) => g.group).sort()).toEqual(["classify:free", "free"]);
+  });
+});
+

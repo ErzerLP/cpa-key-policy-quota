@@ -1,5 +1,30 @@
-import { apiClient } from "./client";
+import { apiClient, pluginPath } from "./client";
 import type { CatalogModel } from "../types";
+
+/** Prefix applied to custom classify groups in catalog entries / ModelRule.group. */
+export const CLASSIFY_GROUP_PREFIX = "classify:";
+
+/** True when group is a custom classify group (classify:name). */
+export function isClassifyGroup(group: string | undefined | null): boolean {
+  return !!group && group.toLowerCase().startsWith(CLASSIFY_GROUP_PREFIX);
+}
+
+/**
+ * Human label for a catalog/ModelRule group. Custom classify groups render as
+ * "自定义 · name" (via picker.tier.classify); built-in tiers use picker.tier.*.
+ */
+export function formatTierLabel(
+  t: (k: string, v?: Record<string, string | number>) => string,
+  group: string,
+): string {
+  if (isClassifyGroup(group)) {
+    const name = group.slice(CLASSIFY_GROUP_PREFIX.length);
+    return t("picker.tier.classify", { name });
+  }
+  const key = "picker.tier." + group;
+  const translated = t(key);
+  return translated === key ? group : translated;
+}
 
 // CPA has no single "list providers+models" endpoint. We compose from several
 // management routes. The raw shapes are loose, so each adapter pulls strings out
@@ -332,24 +357,15 @@ export async function fetchCatalog(
     });
   }
 
-  // auth-files: fetch the file list (carrying each file's tier/plan identity)
-  // and the per-file models concurrently, then join on file name. For tiered
-  // providers (codex, antigravity) we union same-tier files' models into one
-  // subgroup so the picker shows e.g. "codex · free" with the de-duplicated set
-  // of models that any free-tier auth file supports — authorizing a model there
-  // pins the request to that tier via the plugin Scheduler. Files whose tier we
-  // can't read join the "supported" untiered bucket (never a real tier).
+  // auth-files: fetch file list + per-file models, then POST to the plugin
+  // /catalog so classify rules + built-in tiers are applied server-side
+  // (custom groups come back as classify:<name>). Compat/API-key channels
+  // stay flat and are merged separately above/below.
   await safe(c.get("/v0/management/auth-files"), async (d) => {
     const metas = fromAuthFiles(d);
-    // Every auth file implies its provider is configured (an OAuth credential
-    // exists on disk/in-memory), regardless of tier — record that so the
-    // provider's static-definition entries aren't hidden by filterByConfigured.
     for (const m of metas) {
       if (m.provider) configuredProviders.add(m.provider);
     }
-    // Fetch per-file models in parallel (bounded) so a large auth dir doesn't
-    // serialize into N round-trips. Failures of individual files are swallowed;
-    // a file whose models we couldn't fetch simply contributes nothing.
     const perFile = await Promise.all(
       metas.map((m) =>
         c
@@ -358,23 +374,54 @@ export async function fetchCatalog(
           .catch(() => null),
       ),
     );
-    // Track which (tiered) providers the auth-files path actually contributed
-    // models for. When a tiered provider has real auth files, its models come
-    // from here grouped by tier (codex·team / codex·free / codex·supported) —
-    // and the static model-definitions entries for the SAME provider (which
-    // carry no group/tier) are dropped in filterByConfigured so the user
-    // doesn't see a duplicate bare "codex" group of models that may have no
-    // backing auth file. A provider with NO auth files keeps its static
-    // definitions (e.g. api-key-only providers), since that's the only source.
+
+    const credentials: {
+      id: string;
+      provider: string;
+      attributes?: Record<string, string>;
+      models: string[];
+    }[] = [];
+
     for (const res of perFile) {
       if (!res) continue;
       const fileEntries = fromAuthFileModels(res.meta.provider, res.data);
-      for (const e of fileEntries) {
+      const models = toStrings(fileEntries[0]?.models);
+      if (!res.meta.provider || models.length === 0) continue;
+      const attributes: Record<string, string> = {};
+      if (res.meta.planType) attributes.plan_type = res.meta.planType;
+      credentials.push({
+        id: res.meta.name,
+        provider: res.meta.provider,
+        attributes: Object.keys(attributes).length ? attributes : undefined,
+        models,
+      });
+    }
+
+    if (credentials.length === 0) return;
+
+    // Prefer plugin /catalog (classify + builtin). Fall back to the legacy
+    // client-side tier split if the plugin route is unavailable.
+    try {
+      const { data } = await c.post<{ entries?: RawEntry[] }>(pluginPath("/catalog"), {
+        credentials,
+      });
+      for (const e of data.entries ?? []) {
         const provider = (e.provider ?? "").toLowerCase();
+        if (!provider) continue;
+        entries.push(e);
+        // Any grouped auth-file provider suppresses bare static definitions
+        // for that provider (same as the old tiered-from-auth path).
+        if (e.group) authFileTieredProviders.add(provider);
+        // Tiered providers always suppress bare static even if some files
+        // came back flat (empty group) — mirrors prior TIERED_PROVIDERS logic.
+        if (TIERED_PROVIDERS.has(provider)) authFileTieredProviders.add(provider);
+      }
+    } catch {
+      for (const cred of credentials) {
+        const provider = cred.provider.toLowerCase();
+        const e: RawEntry = { provider, models: cred.models };
         if (TIERED_PROVIDERS.has(provider)) {
-          // "supported" bucket for files with no readable tier claim; real
-          // tiers keep their plan_type value as the group.
-          e.group = res.meta.planType || SUPPORTED_GROUP;
+          e.group = cred.attributes?.plan_type || SUPPORTED_GROUP;
           authFileTieredProviders.add(provider);
         }
         entries.push(e);

@@ -510,47 +510,24 @@ func TestTokenModeFreeAliasStillCounts(t *testing.T) {
 // GET /v1/models (allowed); a key with it false (default) is 401. We cannot
 // filter the list contents per key (CPA limitation), only hide/show it.
 func TestAllowModelsEndpointPerKey(t *testing.T) {
-	hash, err := HashKey("cpa_models")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Distinct secrets per key so Authenticate resolves the intended config
+	// (sharing one hash makes map iteration order non-deterministic).
 	store := NewStore()
-	if err := store.Configure(Config{Enabled: true, StateFile: filepath.Join(t.TempDir(), "state.json"), Keys: []KeyConfig{
-		{ID: "hidden", Enabled: true, KeyHash: hash, Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}},
-		{ID: "open", Enabled: true, KeyHash: hash, Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}, AllowModelsEndpoint: true},
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	hdr := http.Header{"Authorization": {"Bearer " + "cpa_models"}}
-
-	dHidden := store.Authenticate("GET", "/v1/models", hdr, nil, nil)
-	if dHidden.Allowed || dHidden.Reason != "models_endpoint_disabled" {
-		t.Fatalf("hidden key decision = %+v, want models_endpoint_disabled", dHidden)
-	}
-
-	dOpen := store.Authenticate("GET", "/v1/models", hdr, nil, nil)
-	// Same header hashes to one secret; both keys share it. To pick the "open"
-	// key explicitly, match by ID via a second secret. Simpler: add a distinct
-	// secret per key by mutating the hash below. Reconfigure with unique secrets.
-	_ = dOpen // (crafted below with unique secrets instead)
-
-	// Recreate with distinct secrets so Authenticate resolves the intended key.
-	store2 := NewStore()
 	hashA, _ := HashKey("cpa_a")
 	hashB, _ := HashKey("cpa_b")
-	if err := store2.Configure(Config{Enabled: true, StateFile: filepath.Join(t.TempDir(), "state2.json"), Keys: []KeyConfig{
+	if err := store.Configure(Config{Enabled: true, StateFile: filepath.Join(t.TempDir(), "state2.json"), Keys: []KeyConfig{
 		{ID: "hidden", Enabled: true, KeyHash: hashA, Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}},
 		{ID: "open", Enabled: true, KeyHash: hashB, Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}, AllowModelsEndpoint: true},
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	dHidden2 := store2.Authenticate("GET", "/v1/models", http.Header{"Authorization": {"Bearer cpa_a"}}, nil, nil)
-	if dHidden2.Allowed || dHidden2.Reason != "models_endpoint_disabled" {
-		t.Fatalf("hidden key (secret a) = %+v, want models_endpoint_disabled", dHidden2)
+	dHidden := store.Authenticate("GET", "/v1/models", http.Header{"Authorization": {"Bearer cpa_a"}}, nil, nil)
+	if dHidden.Allowed || dHidden.Reason != "models_endpoint_disabled" {
+		t.Fatalf("hidden key (secret a) = %+v, want models_endpoint_disabled", dHidden)
 	}
-	dOpen2 := store2.Authenticate("GET", "/v1/models", http.Header{"Authorization": {"Bearer cpa_b"}}, nil, nil)
-	if !dOpen2.Allowed || dOpen2.Reason != "models_endpoint_allowed" {
-		t.Fatalf("open key (secret b) = %+v, want Allowed + models_endpoint_allowed", dOpen2)
+	dOpen := store.Authenticate("GET", "/v1/models", http.Header{"Authorization": {"Bearer cpa_b"}}, nil, nil)
+	if !dOpen.Allowed || dOpen.Reason != "models_endpoint_allowed" {
+		t.Fatalf("open key (secret b) = %+v, want Allowed + models_endpoint_allowed", dOpen)
 	}
 }
 
