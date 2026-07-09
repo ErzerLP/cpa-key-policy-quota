@@ -1,40 +1,118 @@
 # cpa-key-policy
 
-`cpa-key-policy` is a CLIProxyAPI dynamic library plugin for downstream API key policy control.
+Downstream **API key policy** plugin for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
 
-It lets each plugin-owned downstream key use a small model alias list, routes those aliases to real CPA provider models, and applies single-instance RPM limits. It is intentionally a non-exclusive frontend auth provider, so existing CLIProxyAPI `api-keys` can still coexist as an admin or compatibility path.
+In plain words: you issue your own `cpa_…` keys to clients. Each key only sees the models you allow, can be rate-limited and budget-limited, and is routed to real CPA upstream providers (Codex, Claude, OpenAI-compat channels, etc.). CPA’s own `api-keys` can still exist for admin use — **do not put plugin-issued keys into `api-keys`**, or you bypass this plugin.
 
-Do not put plugin-issued keys into CLIProxyAPI `api-keys`; that bypasses this plugin's policy.
+| | |
+|---|---|
+| **Repo** | [origin652/cpa-plugin-key-policy](https://github.com/origin652/cpa-plugin-key-policy) |
+| **License** | MIT |
+| **Install** | [CLIProxyAPI Plugins Store](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store) or build from source |
+| **中文说明** | [README.zh-CN.md](./README.zh-CN.md) |
 
-**Author / repository:** [origin652/cpa-plugin-key-policy](https://github.com/origin652/cpa-plugin-key-policy) (MIT). Install via the [CLIProxyAPI Plugins Store](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store) or build from source.
+---
 
-## Capabilities
+## What it does (human version)
 
-- `FrontendAuthProvider`: authenticates plugin keys, blocks `/v1/models`, checks model alias permissions, and applies RPM.
-- `ModelRouter`: routes an allowed alias to a built-in CPA provider and target model.
-- `ResponseInterceptor`: rewrites top-level non-streaming JSON `model` fields back to the downstream alias.
-- `ManagementAPI`: manages keys and policies through CPA's existing management authentication.
+1. **Issue keys** — create many downstream keys; each has an allow-list of models (or shared aliases).
+2. **Route** — client calls with alias name `fast`; plugin rewrites to e.g. `codex` + `gpt-5.4-mini`.
+3. **Limit** — per-key RPM, optional daily/weekly USD caps, token or per-call billing.
+4. **Isolate credentials (tiers / groups)** — pin a request to Codex free/team/… or to a **custom classify group** so it never lands on the wrong auth file.
+5. **Multi-target aliases** — one alias can point at several backends (priority or round-robin).
+6. **Web UI** — manage keys, global aliases, and credential classification inside CPA.
+7. **Optional sidecar** — filtered `GET /v1/models` so clients only list *their* aliases.
+
+---
+
+## Concepts
+
+### Downstream key
+
+A plugin-owned secret (`cpa_…`). Authenticated only by this plugin. Holds:
+
+- allowed **models** and/or **aliases**
+- RPM
+- optional daily / weekly dollar limits
+- optional `allow_models_endpoint` (see below)
+
+### Alias (global mapping table)
+
+A reusable name like `fast` that expands to one or more **targets**:
+
+| Field | Meaning |
+|--------|---------|
+| `provider` | CPA provider id (`codex`, `claude`, or an openai-compatibility **name** such as `cerebras`) |
+| `target_model` | Real upstream model id |
+| `group` | Optional credential filter (see [Credential groups](#credential-groups-tiers--classify)) |
+| `dispatch` | `priority` (always first usable target) or `round-robin` |
+| billing | `tokens` (per-million prices) or `per_call` (fixed USD) |
+
+Keys can **reference** aliases instead of duplicating targets. Multi-target aliases expand to several rules with the same alias name; auth and routing share one pick per request so the `group` filter matches the chosen target.
+
+### Credential groups (tiers + classify)
+
+Two sources of “which auth file may serve this request”:
+
+| Kind | How it appears in the picker | Stored in mapping as |
+|------|------------------------------|----------------------|
+| **Built-in tier** (Codex `plan_type`, Antigravity `tier`) | e.g. Free tier / Team | bare name: `free`, `team`, `supported` |
+| **Custom classify rule** | e.g. **Custom · vip** | prefixed: `classify:vip` |
+
+**Runtime rule:** if a mapping sets a group, the plugin scheduler **only** picks auth files in that group. No match → hard failure (`auth_not_found`), never silently fall back to another tier.
+
+**Custom classification** (Web UI → Mapping → Credential Classification):
+
+- Match auth-file fields (`filename`, `provider`, `plan_type`, `tier`, …) with a regex.
+- Assign a **group name** you choose (stored bare on the rule).
+- Catalog and mappings use `classify:<name>` so it never collides with built-in `free` / `team`.
+- One file can match **multiple** custom groups (shown under each).
+- If no custom rule matches → built-in tier (for Codex/Antigravity) or flat (no group) for other auth-file providers.
+- OpenAI-compat / API-key channels stay **flat** (no groups).
+
+Configure classify rules in the UI, or via management API (`/classify-rules`, `/classify-preview`, `/catalog`). You do not need to hand-edit state JSON for normal use.
+
+### OpenAI-compatibility providers
+
+Channels under CPA `openai-compatibility` (e.g. a named proxy) use the **channel name** as `provider`. The plugin maps it to CPA’s internal key `openai-compatible-<name>` when routing. Models must be listed on that channel in CPA config, or the host reports no auth for that model.
+
+---
+
+## Capabilities (plugin hooks)
+
+| Hook | Role |
+|------|------|
+| Frontend auth | Know plugin keys; enforce alias allow-list, RPM, budget; stamp route + group metadata |
+| Model router | Alias → provider + target model |
+| Scheduler | When `group` is set, filter auth candidates by tier / `classify:` group |
+| Response interceptor | Non-stream JSON: rewrite top-level `model` back to the alias |
+| Usage | Token / per-call billing into the state file |
+| Management API + embedded Web UI | Keys, aliases, classify rules, status |
+
+---
 
 ## Build
 
-Linux builds require cgo and a matching C toolchain for the target architecture.
+Linux `.so` needs cgo and a matching toolchain:
 
 ```bash
 make test
-make build-linux
+make build-linux          # builds web UI, then linux amd64/arm64 .so
+# or
+make web-build
+GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -buildvcs=false -tags cshared \
+  -buildmode=c-shared -o dist/cpa-key-policy_linux_amd64.so ./cmd/cpa-key-policy
 ```
 
-Manual single-target build:
+On Windows, build the `.so` via WSL/Linux. `go test ./...` uses a non-cgo stub so unit tests run without a shared-library toolchain.
 
-```bash
-GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -buildvcs=false -tags cshared -buildmode=c-shared -o dist/cpa-key-policy_linux_amd64.so ./cmd/cpa-key-policy
-```
+Copy the `.so` into CPA `plugins.dir` and enable the plugin in config.
 
-On Windows, use WSL/Linux or a working cross-cgo toolchain to produce Linux `.so` files. The default `go test ./...` path uses a non-cgo stub so policy tests can run without a dynamic-library toolchain.
-
-Copy the `.so` into CLIProxyAPI's configured `plugins.dir`, then enable it in config.
+---
 
 ## Config
+
+Minimal shape (see also [`config.example.yaml`](./config.example.yaml)):
 
 ```yaml
 plugins:
@@ -45,37 +123,75 @@ plugins:
       enabled: true
       priority: 10
       state_file: "cpa-key-policy-state.json"
-      keys:
-        - id: "team-a"
-          name: "Team A"
-          enabled: true
-          key_hash: "sha256:..."
-          key_preview: "cpa_abc...xyz"
-          rpm: 60
-          models:
-            - alias: "fast"
-              provider: "codex"
-              target_model: "gpt-5-codex"
-            - alias: "sonnet"
-              provider: "claude"
-              target_model: "claude-sonnet-4-5-20250929"
+      # Optional filtered models list proxy (see Sidecar)
+      sidecar:
+        enabled: false
+        listen: "127.0.0.1:19090"
+        upstream: "http://127.0.0.1:8317"
+        models_api_key: "replace-with-upstream-key-that-can-list-models"
 ```
 
-If `state_file` exists, it becomes the source of truth. If it does not exist, configured `keys` initialize runtime state; the first Management API write persists the state file.
+Notes:
 
-## Management API
+- If `state_file` exists, it is the source of truth for keys / aliases / classify rules / usage.
+- Prefer creating keys and aliases in the **Web UI** or Management API; seed YAML `keys` is mainly for first boot.
+- Never commit real key hashes, management secrets, or live host URLs into public docs.
 
-CLIProxyAPI plugin management routes are exact paths, not dynamic path templates. This plugin therefore uses collection routes with `id` in query or JSON body.
+---
 
-- `GET /v0/management/plugins/cpa-key-policy/keys`
-- `POST /v0/management/plugins/cpa-key-policy/keys`
-- `PATCH /v0/management/plugins/cpa-key-policy/keys`
-- `DELETE /v0/management/plugins/cpa-key-policy/keys?id=team-a`
-- `POST /v0/management/plugins/cpa-key-policy/keys/rotate`
-- `POST /v0/management/plugins/cpa-key-policy/keys/reset-rpm`
-- `GET /v0/management/plugins/cpa-key-policy/status`
+## Web Management UI
 
-Create a key:
+Embedded in the plugin. After load, open:
+
+```text
+http://<your-cpa-host>:<api-port>/v0/resource/plugins/cpa-key-policy/index.html
+```
+
+Login with CPA **management** secret (`remote-management.secret-key` / management password). The secret stays in memory only (not `localStorage`); refresh → re-login.
+
+UI areas:
+
+| Tab / page | Use for |
+|------------|---------|
+| Keys | Create / edit / rotate / delete keys; bind models or aliases; RPM & budgets |
+| Mapping → Aliases | Global multi-target aliases, dispatch, pricing |
+| Mapping → Classification | Custom credential groups + match preview |
+| Model picker | Catalog of providers; tier / **Custom · …** subgroups |
+
+Dev UI without rebuilding the `.so`:
+
+```bash
+cd web
+npm install
+VITE_CPA_BASE=http://127.0.0.1:8317 npm run dev
+```
+
+---
+
+## Management API (summary)
+
+Exact paths (no path templates). Auth: CPA management bearer token.
+
+**Keys**
+
+- `GET/POST/PATCH/DELETE …/keys` (`id` in query or body for mutate)
+- `POST …/keys/rotate?id=…`
+- `POST …/keys/reset-rpm?id=…`
+- `GET …/keys/usage?id=…`
+- `GET …/status`
+
+**Aliases**
+
+- `GET/POST/DELETE …/aliases`
+
+**Classify**
+
+- `GET/POST/DELETE …/classify-rules`
+- `POST …/classify-rules/reorder`
+- `POST …/classify-preview` — group → credential ids (UI preview; bare group names)
+- `POST …/catalog` — body: auth-file credentials + models; response: picker `entries` with `classify:` groups
+
+Create key (plain key returned **once**):
 
 ```bash
 curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/keys" \
@@ -86,44 +202,55 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/keys" \
     "name": "Team A",
     "rpm": 60,
     "models": [
-      {"alias":"fast","provider":"codex","target_model":"gpt-5-codex"}
+      {"alias":"fast","provider":"codex","target_model":"gpt-5.4-mini","group":"free"}
     ]
   }'
 ```
 
-The response includes `plain_key` once. Later list/get responses only expose `key_preview`.
-
-Rotate a key:
+Create a multi-target alias:
 
 ```bash
-curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/keys/rotate?id=team-a" \
-  -H "Authorization: Bearer $MANAGEMENT_KEY"
+curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/aliases" \
+  -H "Authorization: Bearer $MANAGEMENT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "alias": "cheap-chat",
+    "dispatch": "priority",
+    "billing_mode": "tokens",
+    "targets": [
+      {"provider":"cerebras","target_model":"gpt-oss-120b"},
+      {"provider":"codex","target_model":"gpt-5.4-mini","group":"free"}
+    ]
+  }'
 ```
 
-## Request Behavior
+---
 
-Known plugin key:
+## Client request behavior
 
-- allowed alias: request authenticates, routes to configured provider/model, and counts toward RPM.
-- disallowed alias: frontend auth returns unauthenticated, which usually surfaces as an auth failure.
-- `/v1/models` on CPA's main port: per-key `allow_models_endpoint` is binary (401 or full global list). CPA cannot filter the list per downstream key on that port.
+| Case | Result |
+|------|--------|
+| Known key + allowed alias | Auth OK → route → optional group filter → upstream |
+| Known key + unknown model | Auth rejected |
+| RPM / budget exceeded | Rejected |
+| Group set, no matching auth file | `auth_not_found` / unavailable (no cross-tier leak) |
+| Unknown key | Plugin declines; CPA may try native `api-keys` |
+| Non-stream chat response | Top-level `model` rewritten to alias |
+| Stream | Body not rewritten (v1) |
 
-### Optional sidecar (filtered `/v1/models`)
+### `/v1/models` on CPA main port
 
-When `sidecar.enabled` is true in plugin config, the plugin listens on `sidecar.listen` (default `127.0.0.1:19090`) and reverse-proxies to `sidecar.upstream` (your CPA base URL, e.g. `http://127.0.0.1:8317`). Clients point their OpenAI SDK at the sidecar instead of CPA directly.
+Per-key `allow_models_endpoint`: **binary** — deny (401) or full global list. CPA cannot filter that list per plugin key on the main port.
 
-How to enable it:
+### Optional sidecar (filtered model list)
 
-1. Pick or create an upstream CPA API key that can call CPA's global `GET /v1/models` on `sidecar.upstream`.
-2. Put that key in `sidecar.models_api_key`. This key is used only by the sidecar itself when fetching the upstream model catalog.
-3. Keep giving end users the plugin-issued downstream `cpa_...` keys. The sidecar authenticates those downstream keys for `GET /v1/models`, filters the upstream catalog to that key's aliases, and returns the filtered list.
-4. Point clients at `http://<sidecar.listen>` instead of the CPA main port. For example, if `listen` is `127.0.0.1:19090`, set OpenAI-compatible `base_url` to `http://127.0.0.1:19090/v1` (or the equivalent base URL setting for your client).
+When `sidecar.enabled` is true, the plugin listens on `sidecar.listen` and proxies to `sidecar.upstream`.
 
-- `GET /v1/models` (and compatible paths): authenticated with the same downstream `cpa_…` keys; OpenAI/Claude `data[].id` responses and Codex-client `models[].slug` responses are filtered to that key's configured **aliases**.
-- Other routes: proxied directly to CPA. CPA's normal auth/plugin chain still applies, so RPM, model routing, usage limits, and billing remain enforced once on the upstream request.
-- If `models_api_key` is omitted, the sidecar forwards the downstream key to upstream for the catalog request. That only works when the downstream key is also allowed to read `/v1/models` on CPA's main port; otherwise upstream returns 401 before filtering. For filtered model lists, configure `models_api_key`.
+1. Set `models_api_key` to an upstream key that can `GET /v1/models` on CPA.
+2. Give end users **plugin** `cpa_…` keys only.
+3. Point clients at the sidecar base URL (e.g. `http://127.0.0.1:19090/v1`).
 
-Example YAML snippet:
+Then `GET /v1/models` is filtered to that key’s aliases; other routes still go to CPA (plugin policy still applies once upstream).
 
 ```yaml
 sidecar:
@@ -133,55 +260,26 @@ sidecar:
   models_api_key: "replace-with-cpa-api-key-that-can-list-models"
 ```
 
-Unknown key:
+---
 
-- plugin returns unauthenticated and lets CLIProxyAPI's native `api-keys` or other auth providers try the request.
+## Setup checklist
 
-Streaming responses are not model-rewritten in v1. Non-streaming JSON responses with a top-level `model` field are rewritten back to the requested alias.
+1. Build / install the `.so` into CPA `plugins.dir`.
+2. Enable `plugins` + `cpa-key-policy` in CPA config; set `state_file`.
+3. Open the Web UI with the management secret.
+4. (Optional) Define **classify rules** if you need custom credential buckets.
+5. Create **aliases** (multi-target / pricing) and/or pick models per key (with tier or Custom group).
+6. Create keys, save the one-time `plain_key`, hand out to clients.
+7. Client: OpenAI-compatible base URL = CPA (or sidecar); `Authorization: Bearer cpa_…`; `model` = alias name.
+8. Ensure openai-compat channels list the models you map; empty model lists → host “no auth” errors.
+9. (Optional) Enable sidecar for filtered `/v1/models`.
 
-## Web Management UI
+---
 
-A small React + Vite + TypeScript frontend lives in [`web/`](./web). It is a thin UI over this plugin's management routes (and CPA's model catalog endpoints) for the common operation the README's curl examples cover: **create a downstream key and pick multiple models from CPA's existing providers**, plus list / edit / rotate / reset-RPM / delete.
-
-The UI is **hosted by CPA itself** as a plugin resource, alongside CPA's own `management.html` (which it does not modify). After building the plugin with `make build-linux`, load it in CPA and open:
-
-```
-http://<cpa-host>:<api-port>/v0/resource/plugins/cpa-key-policy/index.html
-```
-
-This resource is unauthenticated to load; on the login page you enter the **management key** (`remote-management.secret-key` or `$MANAGEMENT_PASSWORD`). The key is held in memory only and is never written to `localStorage`; closing or refreshing the tab returns you to the login page. All data calls go to the authenticated `/v0/management/plugins/cpa-key-policy/...` routes.
-
-### Build
-
-The plugin embeds the UI via `go:embed` from `internal/plugin/web/dist/index.html`. `make build-linux` (and `make web-build`) builds the frontend into a single inlined `index.html` and copies it into that path before compiling the `.so`.
+## Tests
 
 ```bash
-make web-build      # npm install + vite build (single-file) + copy to embed path
-make build-linux    # web-build then compile the .so for linux amd64/arm64
-```
-
-A placeholder `index.html` is committed so the Go build never fails when the frontend has not been built yet; `make web-build` overwrites it with the real UI.
-
-### Run in development (standalone, not embedded)
-
-```bash
-cd web
-npm install
-VITE_CPA_BASE=http://127.0.0.1:8317 npm run dev   # dev server proxies /v0/management to CPA
-```
-
-Open the printed URL, enter CPA's base URL and the management key. This mode is for iterating on the UI without rebuilding the `.so`; the production path is the embedded resource above.
-
-### How model selection works
-
-CPA has no single "list providers + models" endpoint, so the UI composes its catalog from `/v0/management/openai-compatibility`, the per-channel `*-api-key` endpoints, `/v0/management/auth-files` + `auth-files/models`, and `/v0/management/model-definitions/:channel`. Each selected model becomes a `ModelRule` with `alias = target_model` (the client then calls CPA using the real model name). Sources that are unavailable on a given CPA instance are skipped, so a missing endpoint does not blank the picker.
-
-### Tests
-
-```bash
-cd web
-npm test           # vitest unit tests (catalog normalization, session, model-rule builder)
-npm run build      # type-check + production build (single-file)
-go test ./...      # plugin tests, including the resource-serving handler
+go test ./...
+cd web && npm test && npm run build
 ```
 

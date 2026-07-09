@@ -1,3 +1,6 @@
+# Example CLIProxyAPI snippet for cpa-key-policy.
+# Replace placeholders. Do not commit real secrets or production hosts.
+
 plugins:
   enabled: true
   dir: "plugins"
@@ -5,14 +8,20 @@ plugins:
     cpa-key-policy:
       enabled: true
       priority: 10
+      # Runtime source of truth once created (keys, aliases, classify rules, usage).
       state_file: "cpa-key-policy-state.json"
+
+      # Optional reverse proxy with filtered GET /v1/models for plugin keys.
       sidecar:
         enabled: false
         listen: "127.0.0.1:19090"
         upstream: "http://127.0.0.1:8317"
-        # Strongly recommended: a CPA key that can read the global /v1/models
-        # list on the upstream. Downstream cpa_ keys still control client access.
+        # Strongly recommended: upstream CPA key that can list global /v1/models.
+        # End users still use plugin-issued cpa_… keys only.
         models_api_key: "replace-with-cpa-api-key-that-can-list-models"
+
+      # Prefer creating keys/aliases/classify rules via Web UI or Management API.
+      # Seed keys below are mainly for first boot when state_file does not exist.
       keys:
         - id: "team-a"
           name: "Team A"
@@ -20,10 +29,15 @@ plugins:
           key_hash: "sha256:replace-with-hash"
           key_preview: "cpa_abc...xyz"
           rpm: 60
+          # Either bind models directly…
           models:
             - alias: "fast"
               provider: "codex"
-              target_model: "gpt-5-codex"
-            - alias: "sonnet"
-              provider: "claude"
-              target_model: "claude-sonnet-4-5-20250929"
+              target_model: "gpt-5.4-mini"
+              group: "free" # built-in tier; custom groups use classify:name
+            - alias: "compat-demo"
+              provider: "cerebras" # openai-compatibility channel name
+              target_model: "gpt-oss-120b"
+          # …or reference global aliases created in the UI / POST /aliases:
+          # aliases:
+          #   - alias: "cheap-chat"
