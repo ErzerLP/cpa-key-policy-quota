@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 
@@ -13,16 +14,26 @@ import (
 )
 
 type App struct {
-	store *policy.Store
+	store         *policy.Store
+	classifyMu    sync.RWMutex
+	classifyCache map[string][]string
 }
+
+const classifyCacheCapacity = 4096
 
 func NewApp() *App {
 	store := policy.NewStore()
 	_ = store.Configure(policy.DefaultConfig())
-	return &App{store: store}
+	return &App{store: store, classifyCache: make(map[string][]string)}
 }
 
 func (a *App) HandleMethod(method string, request []byte) ([]byte, error) {
+	return safePluginCall(func() ([]byte, error) {
+		return a.handleMethod(method, request)
+	})
+}
+
+func (a *App) handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
 	case MethodPluginRegister, MethodPluginReconfigure:
 		if err := a.configure(request); err != nil {
@@ -50,6 +61,16 @@ func (a *App) HandleMethod(method string, request []byte) ([]byte, error) {
 	}
 }
 
+func safePluginCall(call func() ([]byte, error)) (response []byte, err error) {
+	defer func() {
+		if recover() != nil {
+			response = nil
+			err = errors.New("plugin panic recovered")
+		}
+	}()
+	return call()
+}
+
 func (a *App) configure(raw []byte) error {
 	var req LifecycleRequest
 	if len(raw) > 0 {
@@ -66,20 +87,16 @@ func (a *App) configure(raw []byte) error {
 	}
 	// Register the classify cache clear callback, then clear once for safety.
 	a.store.SetOnClassifyRulesChanged(func() {
-		classifyCache.mu.Lock()
-		classifyCache.data = make(map[string][]string)
-		classifyCache.mu.Unlock()
+		a.clearClassifyCache()
 	})
-	classifyCache.mu.Lock()
-	classifyCache.data = make(map[string][]string)
-	classifyCache.mu.Unlock()
+	a.clearClassifyCache()
 	a.store.StartUsageFlusher()
 	return nil
 }
 
 // Shutdown flushes usage. Host calls this on plugin unload.
 func (a *App) Shutdown() {
-	a.store.FlushUsage()
+	a.store.StopUsageFlusher()
 }
 
 func (a *App) registration() Registration {
@@ -258,6 +275,9 @@ func (a *App) pickScheduler(raw []byte) ([]byte, error) {
 
 	matched := make([]SchedulerAuthCandidate, 0, len(req.Candidates))
 	for _, cand := range req.Candidates {
+		if !schedulerCandidateUsable(cand.Status) {
+			continue
+		}
 		if a.candidateMatchesGroup(cand, group) {
 			matched = append(matched, cand)
 		}
@@ -268,10 +288,7 @@ func (a *App) pickScheduler(raw []byte) ([]byte, error) {
 		// Handled=false would let the host pick ANY auth including other tiers.
 		// Instead we report an explicit "auth_not_found" so the caller sees the
 		// intent honored (no available tier-matching auth) rather than a leak.
-		return OKEnvelope(SchedulerPickResponse{
-			Handled: true,
-			AuthID:  "",
-		})
+		return ErrorEnvelope("auth_not_found", "cpa-key-policy: no eligible auth candidate for requested group", http.StatusServiceUnavailable), nil
 	}
 
 	best := matched[0]
@@ -284,12 +301,16 @@ func (a *App) pickScheduler(raw []byte) ([]byte, error) {
 	return OKEnvelope(SchedulerPickResponse{Handled: true, AuthID: best.ID})
 }
 
-// classifyCache memoizes candidate ID → set of groups. Cleared on reconfigure.
-// This avoids re-running regex on every request for large auth-file sets.
-var classifyCache = struct {
-	mu   sync.RWMutex
-	data map[string][]string // candidate ID → groups
-}{}
+func schedulerCandidateUsable(status string) bool {
+	status = strings.ToLower(strings.TrimSpace(status))
+	status = strings.NewReplacer("-", "_", " ", "_").Replace(status)
+	switch status {
+	case "disabled", "error", "expired", "revoked", "invalid", "unavailable", "cooldown", "cooling_down", "quota_exhausted", "exhausted", "blocked":
+		return false
+	default:
+		return true
+	}
+}
 
 // candidateMatchesGroup reports whether a candidate auth belongs to the
 // requested group. It first evaluates user-defined ClassifyRules (which can
@@ -311,14 +332,14 @@ func (a *App) candidateMatchesGroup(cand SchedulerAuthCandidate, group string) b
 // custom rule matches, the built-in plan_type/tier detection runs. Results are
 // cached by candidate ID; the cache is cleared on reconfigure.
 func (a *App) candidateGroups(cand SchedulerAuthCandidate) []string {
-	id := cand.ID
+	cacheKey := candidateClassifyCacheKey(cand)
 	// Check cache.
-	classifyCache.mu.RLock()
-	if cached, ok := classifyCache.data[id]; ok {
-		classifyCache.mu.RUnlock()
+	a.classifyMu.RLock()
+	if cached, ok := a.classifyCache[cacheKey]; ok {
+		a.classifyMu.RUnlock()
 		return cached
 	}
-	classifyCache.mu.RUnlock()
+	a.classifyMu.RUnlock()
 
 	var groups []string
 	// 1. Evaluate custom classify rules (multi-group: collect all matches).
@@ -343,13 +364,38 @@ func (a *App) candidateGroups(cand SchedulerAuthCandidate) []string {
 	}
 
 	// Cache the result.
-	classifyCache.mu.Lock()
-	if classifyCache.data == nil {
-		classifyCache.data = make(map[string][]string)
+	a.classifyMu.Lock()
+	if a.classifyCache == nil || len(a.classifyCache) >= classifyCacheCapacity {
+		a.classifyCache = make(map[string][]string)
 	}
-	classifyCache.data[id] = groups
-	classifyCache.mu.Unlock()
+	a.classifyCache[cacheKey] = groups
+	a.classifyMu.Unlock()
 	return groups
+}
+
+func (a *App) clearClassifyCache() {
+	a.classifyMu.Lock()
+	a.classifyCache = make(map[string][]string)
+	a.classifyMu.Unlock()
+}
+
+func candidateClassifyCacheKey(cand SchedulerAuthCandidate) string {
+	keys := make([]string, 0, len(cand.Attributes))
+	for key := range cand.Attributes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var builder strings.Builder
+	builder.WriteString(cand.ID)
+	builder.WriteByte(0)
+	builder.WriteString(cand.Provider)
+	for _, key := range keys {
+		builder.WriteByte(0)
+		builder.WriteString(key)
+		builder.WriteByte('=')
+		builder.WriteString(cand.Attributes[key])
+	}
+	return builder.String()
 }
 
 // candidateFieldValue extracts the value of a named field from the candidate.
@@ -403,30 +449,6 @@ func schedulerGroupFromMetadata(meta map[string]any) string {
 		return strings.ToLower(strings.TrimSpace(v))
 	default:
 		return strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", v)))
-	}
-}
-
-// schedulerCandidateMatchesGroup reports whether a candidate auth belongs to
-// the requested tier. The codex planner sets Attributes["plan_type"] inside the
-// host; antigravity uses a tier concept. We treat an empty/absent plan_type as
-// the "supported-untiered" bucket, which matches group "supported" only —
-// ensuring a downstream key pinned to a real tier never falls onto an untiered
-// file (and vice versa).
-func schedulerCandidateMatchesGroup(cand SchedulerAuthCandidate, group string) bool {
-	if cand.Attributes == nil {
-		return group == "supported" || group == "unknown"
-	}
-	plan := strings.ToLower(strings.TrimSpace(cand.Attributes["plan_type"]))
-	tier := strings.ToLower(strings.TrimSpace(cand.Attributes["tier"]))
-	switch group {
-	case "supported", "unknown":
-		// Untiered bucket: matches candidates with no recognizable plan/tier.
-		return plan == "" && tier == ""
-	default:
-		if plan == group {
-			return true
-		}
-		return tier == group
 	}
 }
 
@@ -538,32 +560,32 @@ func (a *App) handleManagement(raw []byte) ([]byte, error) {
 }
 
 type keyWriteRequest struct {
-	ID                  string              `json:"id"`
-	Name                *string             `json:"name,omitempty"`
-	Enabled             *bool               `json:"enabled,omitempty"`
-	Key                 string              `json:"key,omitempty"`
-	RPM                 *int                `json:"rpm,omitempty"`
+	ID                  string               `json:"id"`
+	Name                *string              `json:"name,omitempty"`
+	Enabled             *bool                `json:"enabled,omitempty"`
+	Key                 string               `json:"key,omitempty"`
+	RPM                 *int                 `json:"rpm,omitempty"`
 	Models              []policy.ModelRule   `json:"models,omitempty"`
 	Aliases             []policy.KeyAliasRef `json:"aliases,omitempty"`
-	DailyLimitUSD       *float64            `json:"daily_limit_usd,omitempty"`
-	WeeklyLimitUSD      *float64            `json:"weekly_limit_usd,omitempty"`
-	AllowModelsEndpoint *bool               `json:"allow_models_endpoint,omitempty"`
+	DailyLimitUSD       *float64             `json:"daily_limit_usd,omitempty"`
+	WeeklyLimitUSD      *float64             `json:"weekly_limit_usd,omitempty"`
+	AllowModelsEndpoint *bool                `json:"allow_models_endpoint,omitempty"`
 }
 
 type publicKey struct {
-	ID                  string              `json:"id"`
-	Name                string              `json:"name"`
-	Enabled             bool                `json:"enabled"`
-	KeyPreview          string              `json:"key_preview"`
-	RPM                 int                 `json:"rpm"`
-	Models              []policy.ModelRule  `json:"models"`
+	ID                  string               `json:"id"`
+	Name                string               `json:"name"`
+	Enabled             bool                 `json:"enabled"`
+	KeyPreview          string               `json:"key_preview"`
+	RPM                 int                  `json:"rpm"`
+	Models              []policy.ModelRule   `json:"models"`
 	Aliases             []policy.KeyAliasRef `json:"aliases"`
-	DailyLimitUSD       float64             `json:"daily_limit_usd"`
-	WeeklyLimitUSD      float64             `json:"weekly_limit_usd"`
-	AllowModelsEndpoint bool                `json:"allow_models_endpoint,omitempty"`
-	Usage               policy.UsageSummary `json:"usage"`
-	CreatedAt           string              `json:"created_at,omitempty"`
-	UpdatedAt           string              `json:"updated_at,omitempty"`
+	DailyLimitUSD       float64              `json:"daily_limit_usd"`
+	WeeklyLimitUSD      float64              `json:"weekly_limit_usd"`
+	AllowModelsEndpoint bool                 `json:"allow_models_endpoint,omitempty"`
+	Usage               policy.UsageSummary  `json:"usage"`
+	CreatedAt           string               `json:"created_at,omitempty"`
+	UpdatedAt           string               `json:"updated_at,omitempty"`
 }
 
 func (a *App) createKey(body []byte) ManagementResponse {

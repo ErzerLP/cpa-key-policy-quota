@@ -644,8 +644,8 @@ func TestManagementKeyUsageEndpoint(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", resp.StatusCode, resp.Body)
 	}
 	var got struct {
-		KeyID   string                     `json:"key_id"`
-		KeyName string                     `json:"key_name"`
+		KeyID   string                   `json:"key_id"`
+		KeyName string                   `json:"key_name"`
 		Aliases []policy.AliasUsageEntry `json:"aliases"`
 	}
 	if err := json.Unmarshal(resp.Body, &got); err != nil {
@@ -798,5 +798,14 @@ func TestResolveProviderKey(t *testing.T) {
 				t.Fatalf("resolveProviderKey(%q, %v) = %q, want %q", tc.provider, tc.avail, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestSafePluginCallRecoversPanic(t *testing.T) {
+	response, err := safePluginCall(func() ([]byte, error) {
+		panic("boom")
+	})
+	if err == nil || response != nil {
+		t.Fatalf("safePluginCall response=%q error=%v", response, err)
 	}
 }

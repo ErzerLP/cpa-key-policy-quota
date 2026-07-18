@@ -13,14 +13,14 @@ import (
 
 // aliasUpsertRequest is the body for POST /aliases.
 type aliasUpsertRequest struct {
-	Alias       string                 `json:"alias"`
-	Targets     []policy.AliasTarget   `json:"targets"`
-	Dispatch    string                 `json:"dispatch"`
-	BillingMode string                 `json:"billing_mode"`
-	InputPricePerMillion     float64   `json:"input_price_per_million"`
-	OutputPricePerMillion    float64   `json:"output_price_per_million"`
-	CacheReadPricePerMillion float64   `json:"cache_read_price_per_million"`
-	PerCallUSD               float64   `json:"per_call_usd"`
+	Alias                    string               `json:"alias"`
+	Targets                  []policy.AliasTarget `json:"targets"`
+	Dispatch                 string               `json:"dispatch"`
+	BillingMode              string               `json:"billing_mode"`
+	InputPricePerMillion     float64              `json:"input_price_per_million"`
+	OutputPricePerMillion    float64              `json:"output_price_per_million"`
+	CacheReadPricePerMillion float64              `json:"cache_read_price_per_million"`
+	PerCallUSD               float64              `json:"per_call_usd"`
 }
 
 func (a *App) upsertAlias(raw []byte) ManagementResponse {
@@ -30,14 +30,14 @@ func (a *App) upsertAlias(raw []byte) ManagementResponse {
 	}
 	// Build the new alias entry.
 	alias := policy.AliasMapping{
-		Alias:                     req.Alias,
-		Targets:                   req.Targets,
-		Dispatch:                  req.Dispatch,
-		BillingMode:               req.BillingMode,
-		InputPricePerMillion:      req.InputPricePerMillion,
-		OutputPricePerMillion:     req.OutputPricePerMillion,
-		CacheReadPricePerMillion:  req.CacheReadPricePerMillion,
-		PerCallUSD:                req.PerCallUSD,
+		Alias:                    req.Alias,
+		Targets:                  req.Targets,
+		Dispatch:                 req.Dispatch,
+		BillingMode:              req.BillingMode,
+		InputPricePerMillion:     req.InputPricePerMillion,
+		OutputPricePerMillion:    req.OutputPricePerMillion,
+		CacheReadPricePerMillion: req.CacheReadPricePerMillion,
+		PerCallUSD:               req.PerCallUSD,
 	}
 	if err := a.store.UpsertAlias(alias); err != nil {
 		return jsonError(http.StatusBadRequest, "validation_error", err.Error())
