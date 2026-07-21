@@ -132,9 +132,9 @@ type AliasTarget struct {
 // override the default classification.
 type ClassifyRule struct {
 	Name    string `yaml:"name" json:"name"`
-	Field   string `yaml:"field" json:"field"`   // "filename" | "provider" | "plan_type" | "tier" | custom attribute name
+	Field   string `yaml:"field" json:"field"`     // "filename" | "provider" | "plan_type" | "tier" | custom attribute name
 	Pattern string `yaml:"pattern" json:"pattern"` // regex (Go syntax)
-	Group   string `yaml:"group" json:"group"`   // target group name
+	Group   string `yaml:"group" json:"group"`     // target group name
 	Enabled bool   `yaml:"enabled" json:"enabled"`
 	// compiled is the pre-compiled regex, set by normalizeConfig for fast
 	// evaluation. Not serialized.
@@ -277,7 +277,7 @@ type State struct {
 	// references survive restarts even when config.yaml is not re-read. On
 	// Configure, the config.yaml Aliases take precedence; state Aliases are a
 	// fallback for the state-only reload path (e.g. FlushUsage recovery).
-	Aliases      []AliasMapping `json:"aliases,omitempty"`
+	Aliases       []AliasMapping `json:"aliases,omitempty"`
 	ClassifyRules []ClassifyRule `json:"classify_rules,omitempty"`
 }
 
@@ -330,11 +330,11 @@ func migrateModelsToAliases(cfg *Config) {
 		key := &cfg.Keys[i]
 		if len(key.Models) == 0 {
 			// No Models to migrate. Leave existing Aliases intact — this is the
-		// normal reload path where Models is a derived field (stripped from
-		// disk by SaveState and repopulated in memory by Configure). Only the
-		// PATCH path sends non-nil Models, and an explicit clear sends Models
-		// as an empty non-nil slice which still falls through to the
-		// reconciliation below and correctly drops all alias refs.
+			// normal reload path where Models is a derived field (stripped from
+			// disk by SaveState and repopulated in memory by Configure). Only the
+			// PATCH path sends non-nil Models, and an explicit clear sends Models
+			// as an empty non-nil slice which still falls through to the
+			// reconciliation below and correctly drops all alias refs.
 			continue
 		}
 		// Build the set of alias names present in this key's Models — this is
@@ -375,10 +375,10 @@ func migrateModelsToAliases(cfg *Config) {
 				// Create a new global alias with this target.
 				ai = len(cfg.Aliases)
 				cfg.Aliases = append(cfg.Aliases, AliasMapping{
-					Alias:       m.Alias,
-					Targets:     []AliasTarget{target},
-					Dispatch:    "round-robin",
-					BillingMode: m.BillingMode,
+					Alias:                    m.Alias,
+					Targets:                  []AliasTarget{target},
+					Dispatch:                 "round-robin",
+					BillingMode:              m.BillingMode,
 					InputPricePerMillion:     m.InputPricePerMillion,
 					OutputPricePerMillion:    m.OutputPricePerMillion,
 					CacheReadPricePerMillion: m.CacheReadPricePerMillion,
@@ -660,7 +660,7 @@ func LoadState(path string) (*State, error) {
 
 // SaveState atomically writes the key list plus usage ledger to the state file.
 func SaveState(path string, keys []KeyConfig, usage map[string]*UsageState, aliases []AliasMapping, rules []ClassifyRule) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	// Models is a DERIVED field (resolved from Aliases × global table via
@@ -680,11 +680,7 @@ func SaveState(path string, keys []KeyConfig, usage map[string]*UsageState, alia
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicWriteStateFile(path, raw)
 }
 
 // SaveUsageOnly atomically writes only the usage ledger to the state file,
@@ -697,7 +693,7 @@ func SaveState(path string, keys []KeyConfig, usage map[string]*UsageState, alia
 // does not exist yet, keys defaults to empty (a subsequent key mutation will
 // create it properly via SaveState).
 func SaveUsageOnly(path string, usage map[string]*UsageState) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	var keys []KeyConfig
@@ -707,6 +703,8 @@ func SaveUsageOnly(path string, usage map[string]*UsageState) error {
 		keys = cur.Keys
 		aliases = cur.Aliases
 		rules = cur.ClassifyRules
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	// Strip the derived Models field from every key (see SaveState for why).
 	// On-disk Models may contain pre-fix duplicates from multi-target aliases;
@@ -719,9 +717,31 @@ func SaveUsageOnly(path string, usage map[string]*UsageState) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	return atomicWriteStateFile(path, raw)
+}
+
+func atomicWriteStateFile(path string, raw []byte) error {
+	dir := filepath.Dir(path)
+	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tempName := temp.Name()
+	defer func() { _ = os.Remove(tempName) }()
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if _, err := temp.Write(raw); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempName, path)
 }

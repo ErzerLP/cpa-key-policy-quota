@@ -2,6 +2,7 @@ package policy
 
 import (
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -210,34 +211,37 @@ func TestIsImageVideoEndpoint(t *testing.T) {
 	}
 }
 
-// TestConfigureMergesInMemoryKeysNotOnDisk (Bug 1): a reconfigure that loads
-// a stale disk snapshot (missing a key that exists in memory) must preserve
-// the in-memory key instead of dropping it. Previously Configure did an
-// unconditional s.keys = next, losing any key absent from the disk snapshot.
-func TestConfigureMergesInMemoryKeysNotOnDisk(t *testing.T) {
+// TestConfigureDoesNotResurrectKeysMissingFromState verifies that persisted
+// state remains authoritative during reconfigure. Retaining an in-memory key
+// that was removed from state would keep a revoked credential usable.
+func TestConfigureDoesNotResurrectKeysMissingFromState(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
-	hash, err := HashKey("cpa_merge")
+	onDiskHash, err := HashKey("cpa_on_disk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revokedHash, err := HashKey("cpa_revoked")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Seed initial state with one key on disk.
 	s1 := NewStore()
 	if err := s1.Configure(Config{Enabled: true, StateFile: path, Keys: []KeyConfig{
-		{ID: "on-disk", Enabled: true, KeyHash: hash, Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}},
+		{ID: "on-disk", Enabled: true, KeyHash: onDiskHash, Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}},
 	}}); err != nil {
 		t.Fatal(err)
 	}
 	// Add a second key via the management API (persisted to disk).
-	if err := s1.UpsertKey(KeyConfig{ID: "in-mem", Enabled: true, KeyHash: hash, Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}}, true); err != nil {
+	if err := s1.UpsertKey(KeyConfig{ID: "in-mem", Enabled: true, KeyHash: revokedHash, Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}}, true); err != nil {
 		t.Fatal(err)
 	}
 	// Simulate a stale disk snapshot: write a state containing only "on-disk".
-	if err := SaveState(path, []KeyConfig{{ID: "on-disk", Enabled: true, KeyHash: hash, Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}}}, nil, nil, nil); err != nil {
+	if err := SaveState(path, []KeyConfig{{ID: "on-disk", Enabled: true, KeyHash: onDiskHash, Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}}}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	// Reconfigure with the same path. The stale disk lacks "in-mem", which is
-	// currently in memory. Bug 1 fix must preserve it.
+	// Reconfigure with the same path. The persisted state lacks "in-mem", so it
+	// must be removed from the active authentication index.
 	if err := s1.Configure(Config{Enabled: true, StateFile: path}); err != nil {
 		t.Fatal(err)
 	}
@@ -245,8 +249,11 @@ func TestConfigureMergesInMemoryKeysNotOnDisk(t *testing.T) {
 	for _, k := range s1.Keys() {
 		ids[k.ID] = true
 	}
-	if !ids["on-disk"] || !ids["in-mem"] {
-		t.Fatalf("after reconfigure, keys = %v, want both on-disk and in-mem", ids)
+	if !ids["on-disk"] || ids["in-mem"] {
+		t.Fatalf("after reconfigure, keys = %v, want only on-disk", ids)
+	}
+	if s1.FindByAPIKey("cpa_revoked") != nil {
+		t.Fatal("credential removed from persisted state remained authenticatable")
 	}
 }
 
@@ -333,6 +340,24 @@ func TestFlushUsagePreservesDiskKeys(t *testing.T) {
 	}
 }
 
+func TestSaveUsageOnlyDoesNotOverwriteCorruptState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	original := []byte(`{"keys":`)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveUsageOnly(path, map[string]*UsageState{}); err == nil {
+		t.Fatal("SaveUsageOnly accepted a corrupt state file")
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(current) != string(original) {
+		t.Fatalf("corrupt state was overwritten: %q", current)
+	}
+}
+
 // TestKeysSnapshotSortedByID (Bug 5): Keys() returns a deterministic order
 // sorted by ID, not random map-iteration order.
 func TestKeysSnapshotSortedByID(t *testing.T) {
@@ -376,6 +401,53 @@ func keyIDs(ks []KeyConfig) []string {
 		out[i] = k.ID
 	}
 	return out
+}
+
+func TestStopUsageFlusherWaitsForWorkerExit(t *testing.T) {
+	store, _ := newTestStore(t)
+	store.StartUsageFlusher()
+	store.mu.RLock()
+	flusher := store.flusher
+	store.mu.RUnlock()
+	if flusher == nil {
+		t.Fatal("usage flusher was not started")
+	}
+	store.StopUsageFlusher()
+	select {
+	case <-flusher.doneCh:
+	default:
+		t.Fatal("StopUsageFlusher returned before worker exit")
+	}
+}
+
+func TestStopUsageFlusherFlushesWithoutWorker(t *testing.T) {
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "state.json")
+	hash, err := HashKey("cpa_shutdown_flush")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore()
+	store.SetClock(func() time.Time { return now })
+	if err := store.Configure(Config{Enabled: true, StateFile: path, Keys: []KeyConfig{
+		{ID: "shutdown-key", Enabled: true, KeyHash: hash, Models: []ModelRule{{Alias: "fast", Provider: "openai", TargetModel: "m", BillingMode: "per_call", PerCallUSD: 1}}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	store.RecordUsage("shutdown-key", "fast", "m", false, UsageDetail{})
+
+	// A failed reconfigure can leave no worker running while the plugin keeps
+	// serving. Shutdown must still persist usage recorded after that point.
+	store.StopUsageFlusher()
+
+	state, err := LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := state.Usage["shutdown-key"]
+	if usage == nil || usage.Daily.TotalUSD != 1 || usage.Daily.CallCount != 1 {
+		t.Fatalf("persisted usage = %#v, want one $1 call", usage)
+	}
 }
 
 // imgKey returns the KeyConfig for id (helper for tests that need a value, not

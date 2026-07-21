@@ -96,8 +96,8 @@ keys:
 // TestAliasValidation verifies strong validation of the global alias table.
 func TestAliasValidation(t *testing.T) {
 	tests := []struct {
-		name  string
-		yaml  string
+		name   string
+		yaml   string
 		errSub string
 	}{
 		{
@@ -390,6 +390,53 @@ func TestClassifyRuleCRUD(t *testing.T) {
 	rules = store.ClassifyRulesSnapshot()
 	if len(rules) != 0 {
 		t.Fatalf("expected 0 rules after delete, got %d", len(rules))
+	}
+}
+
+func TestClassifyRuleChangeCallbackCanReenterStore(t *testing.T) {
+	store := NewStore()
+	if err := store.Configure(Config{
+		Enabled: true, StateFile: filepath.Join(t.TempDir(), "state.json"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	callbackDone := make(chan struct{}, 3)
+	store.SetOnClassifyRulesChanged(func() {
+		_ = store.ClassifyRulesSnapshot()
+		callbackDone <- struct{}{}
+	})
+
+	rule := ClassifyRule{
+		Name: "reentrant", Field: "filename", Pattern: ".*", Group: "g", Enabled: true,
+	}
+	operations := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "upsert", run: func() error { return store.UpsertClassifyRule(rule) }},
+		{name: "reorder", run: func() error { return store.ReorderClassifyRules([]string{rule.Name}) }},
+		{name: "delete", run: func() error { return store.DeleteClassifyRule(rule.Name) }},
+	}
+
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			errCh := make(chan error, 1)
+			go func() { errCh <- operation.run() }()
+			select {
+			case err := <-errCh:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("classify rule update deadlocked while callback re-entered Store")
+			}
+			select {
+			case <-callbackDone:
+			case <-time.After(2 * time.Second):
+				t.Fatal("classify rule callback was not invoked")
+			}
+		})
 	}
 }
 

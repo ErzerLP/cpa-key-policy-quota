@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"path/filepath"
 	"testing"
 )
@@ -101,9 +103,8 @@ func TestSchedulerPickPriorityTiebreaksByID(t *testing.T) {
 }
 
 // Isolation guarantee: when a tier group has no matching candidate, we must NOT
-// fall back to a different tier. Returning Handled=true with empty AuthID
-// signals "we decided — no usable auth" so the host surfaces the failure rather
-// than leaking onto the wrong tier.
+// fall back to a different tier. The plugin must return a structured scheduler
+// error because an empty AuthID is invalid and would make the host fall back.
 func TestSchedulerPickNoTierMatchRefusesFallback(t *testing.T) {
 	app, _ := configureTestApp(t)
 	req, _ := json.Marshal(SchedulerPickRequest{
@@ -114,12 +115,12 @@ func TestSchedulerPickNoTierMatchRefusesFallback(t *testing.T) {
 		},
 	})
 	raw, _ := app.HandleMethod(MethodSchedulerPick, req)
-	var resp SchedulerPickResponse
-	if err := unmarshalOK(raw, &resp); err != nil {
+	var envelope Envelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if !resp.Handled || resp.AuthID != "" {
-		t.Fatalf("expected Handled=true empty AuthID (no tier leak), got %+v", resp)
+	if envelope.OK || envelope.Error == nil || envelope.Error.Code != "auth_not_found" || envelope.Error.HTTPStatus != http.StatusServiceUnavailable {
+		t.Fatalf("expected auth_not_found scheduler error, got %+v", envelope)
 	}
 }
 
@@ -192,12 +193,34 @@ keys: []
 		},
 	})
 	raw2, _ := app.HandleMethod(MethodSchedulerPick, req2)
-	var resp2 SchedulerPickResponse
-	if err := unmarshalOK(raw2, &resp2); err != nil {
+	var envelope Envelope
+	if err := json.Unmarshal(raw2, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if !resp2.Handled || resp2.AuthID != "" {
-		t.Fatalf("bare vip must not match classify group, got %+v", resp2)
+	if envelope.OK || envelope.Error == nil || envelope.Error.Code != "auth_not_found" {
+		t.Fatalf("bare vip must return auth_not_found, got %+v", envelope)
+	}
+}
+
+func TestCandidateClassifyCacheTracksAttributeChanges(t *testing.T) {
+	app := NewApp()
+	free := app.candidateGroups(SchedulerAuthCandidate{ID: "same.json", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}})
+	team := app.candidateGroups(SchedulerAuthCandidate{ID: "same.json", Provider: "codex", Attributes: map[string]string{"plan_type": "team"}})
+	if len(free) != 1 || free[0] != "free" || len(team) != 1 || team[0] != "team" {
+		t.Fatalf("cached groups did not track attributes: free=%v team=%v", free, team)
+	}
+}
+
+func TestCandidateClassifyCacheIsBounded(t *testing.T) {
+	app := NewApp()
+	for index := 0; index < classifyCacheCapacity+25; index++ {
+		app.candidateGroups(SchedulerAuthCandidate{ID: fmt.Sprintf("auth-%d", index), Provider: "codex"})
+	}
+	app.classifyMu.RLock()
+	size := len(app.classifyCache)
+	app.classifyMu.RUnlock()
+	if size > classifyCacheCapacity {
+		t.Fatalf("classify cache size = %d, capacity = %d", size, classifyCacheCapacity)
 	}
 }
 
