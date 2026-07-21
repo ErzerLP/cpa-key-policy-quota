@@ -420,6 +420,36 @@ func TestStopUsageFlusherWaitsForWorkerExit(t *testing.T) {
 	}
 }
 
+func TestStopUsageFlusherFlushesWithoutWorker(t *testing.T) {
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "state.json")
+	hash, err := HashKey("cpa_shutdown_flush")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore()
+	store.SetClock(func() time.Time { return now })
+	if err := store.Configure(Config{Enabled: true, StateFile: path, Keys: []KeyConfig{
+		{ID: "shutdown-key", Enabled: true, KeyHash: hash, Models: []ModelRule{{Alias: "fast", Provider: "openai", TargetModel: "m", BillingMode: "per_call", PerCallUSD: 1}}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	store.RecordUsage("shutdown-key", "fast", "m", false, UsageDetail{})
+
+	// A failed reconfigure can leave no worker running while the plugin keeps
+	// serving. Shutdown must still persist usage recorded after that point.
+	store.StopUsageFlusher()
+
+	state, err := LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := state.Usage["shutdown-key"]
+	if usage == nil || usage.Daily.TotalUSD != 1 || usage.Daily.CallCount != 1 {
+		t.Fatalf("persisted usage = %#v, want one $1 call", usage)
+	}
+}
+
 // imgKey returns the KeyConfig for id (helper for tests that need a value, not
 // a pointer, for UsageSummaryFor).
 func imgKey(s *Store, id string) KeyConfig {

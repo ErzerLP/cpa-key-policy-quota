@@ -1346,11 +1346,10 @@ func (s *Store) StopUsageFlusher() {
 	f := s.flusher
 	s.flusher = nil
 	s.mu.Unlock()
-	if f == nil {
-		return
+	if f != nil {
+		f.stop()
+		<-f.doneCh
 	}
-	f.stop()
-	<-f.doneCh
 	_ = s.FlushUsage()
 }
 
