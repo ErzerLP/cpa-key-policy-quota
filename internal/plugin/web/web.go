@@ -18,15 +18,39 @@ var indexHTML []byte
 
 const contentType = "text/html; charset=utf-8"
 
-// IndexPath is the resource path (relative to the plugin resource base) the UI
-// is served at.
-const IndexPath = "/index.html"
+// IndexPath is the resource path (relative to the plugin resource base) for
+// the management UI. QuotaPath serves the same single-file bundle in
+// self-service mode, while QuotaAPIPath is handled by the plugin backend.
+const (
+	IndexPath    = "/index.html"
+	QuotaPath    = "/quota.html"
+	QuotaAPIPath = "/quota/api"
+)
 
-// Serve returns a management response for a plugin resource GET request. It
-// only handles the index page; any other path yields 404.
+// Serve returns the embedded single-file UI for either browser entry point.
 func Serve(path string) (status int, headers http.Header, body []byte) {
-	if strings.TrimRight(path, "/") != IndexPath {
+	clean := strings.TrimRight(path, "/")
+	if clean != IndexPath && clean != QuotaPath {
 		return http.StatusNotFound, http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}}, []byte("not found")
 	}
-	return http.StatusOK, http.Header{"Content-Type": []string{contentType}}, indexHTML
+	headers = http.Header{
+		"Content-Type":            []string{contentType},
+		"Cache-Control":           []string{"no-store"},
+		"Content-Security-Policy": []string{resourceCSP(clean)},
+		"Permissions-Policy":      []string{"camera=(), microphone=(), geolocation=()"},
+		"Referrer-Policy":         []string{"no-referrer"},
+		"X-Content-Type-Options":  []string{"nosniff"},
+		"X-Frame-Options":         []string{"SAMEORIGIN"},
+	}
+	return http.StatusOK, headers, indexHTML
+}
+
+func resourceCSP(path string) string {
+	connectSources := "'self'"
+	if path == IndexPath {
+		connectSources += " https://raw.githubusercontent.com"
+	}
+	return "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'; " +
+		"script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; " +
+		"font-src 'self' data:; connect-src " + connectSources
 }

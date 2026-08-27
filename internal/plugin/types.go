@@ -38,12 +38,16 @@ const (
 
 	MethodManagementRegister = "management.register"
 	MethodManagementHandle   = "management.handle"
+
+	MethodHostAuthList = "host.auth.list"
+	MethodHostAuthGet  = "host.auth.get"
+	MethodHostHTTPDo   = "host.http.do"
 )
 
 const (
 	PluginID   = "cpa-key-policy"
-	PluginName = "cpa-key-policy"
-	Version    = "0.4.4"
+	PluginName = "cpa-key-policy-quota"
+	Version    = "0.5.0"
 )
 
 type Envelope struct {
@@ -247,17 +251,66 @@ type ResourceRoute struct {
 }
 
 type ManagementRequest struct {
-	Method  string      `json:"Method"`
-	Path    string      `json:"Path"`
-	Headers http.Header `json:"Headers"`
-	Query   url.Values  `json:"Query"`
-	Body    []byte      `json:"Body"`
+	Method         string      `json:"Method"`
+	Path           string      `json:"Path"`
+	Headers        http.Header `json:"Headers"`
+	Query          url.Values  `json:"Query"`
+	Body           []byte      `json:"Body"`
+	HostCallbackID string      `json:"host_callback_id,omitempty"`
 }
 
 type ManagementResponse struct {
 	StatusCode int         `json:"StatusCode,omitempty"`
 	Headers    http.Header `json:"Headers,omitempty"`
 	Body       []byte      `json:"Body,omitempty"`
+}
+
+// HostAuthFileEntry is the safe auth-file descriptor returned by host.auth.list.
+// AuthIndex is an opaque runtime handle and must never be exposed by self-service APIs.
+type HostAuthFileEntry struct {
+	AuthIndex   string `json:"auth_index"`
+	ID          string `json:"id,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Provider    string `json:"provider,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Status      string `json:"status,omitempty"`
+	Disabled    bool   `json:"disabled,omitempty"`
+	Unavailable bool   `json:"unavailable,omitempty"`
+	AccountType string `json:"account_type,omitempty"`
+}
+
+type HostAuthListResponse struct {
+	Files []HostAuthFileEntry `json:"files"`
+}
+
+type HostAuthGetRequest struct {
+	AuthIndex string `json:"auth_index"`
+}
+
+type HostAuthGetResponse struct {
+	JSON json.RawMessage `json:"json"`
+}
+
+type HostHTTPRequest struct {
+	HostCallbackID string              `json:"host_callback_id,omitempty"`
+	Method         string              `json:"method,omitempty"`
+	URL            string              `json:"url,omitempty"`
+	Headers        map[string][]string `json:"headers,omitempty"`
+	Body           []byte              `json:"body,omitempty"`
+}
+
+type HostHTTPResponse struct {
+	StatusCode int                 `json:"StatusCode"`
+	Headers    map[string][]string `json:"Headers,omitempty"`
+	Body       []byte              `json:"Body,omitempty"`
+}
+
+// HostClient is implemented by the c-shared ABI bridge. Keeping it behind an
+// interface lets quota resolution be tested without loading CLIProxyAPI.
+type HostClient interface {
+	ListAuth() ([]HostAuthFileEntry, error)
+	GetAuth(authIndex string) (json.RawMessage, error)
+	DoHTTP(request HostHTTPRequest) (HostHTTPResponse, error)
 }
 
 func OKEnvelope(v any) ([]byte, error) {

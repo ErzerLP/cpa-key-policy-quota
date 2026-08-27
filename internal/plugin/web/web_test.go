@@ -32,6 +32,27 @@ func TestServeTrailingSlashTrimmed(t *testing.T) {
 	}
 }
 
+func TestServeQuotaPageUsesStrictSecurityHeaders(t *testing.T) {
+	status, headers, body := Serve(QuotaPath)
+	if status != http.StatusOK || len(body) == 0 {
+		t.Fatalf("quota page response = %d, %d bytes", status, len(body))
+	}
+	if headers.Get("Cache-Control") != "no-store" || headers.Get("X-Frame-Options") != "SAMEORIGIN" {
+		t.Fatalf("quota page security headers = %+v", headers)
+	}
+	csp := headers.Get("Content-Security-Policy")
+	if csp == "" || contains([]byte(csp), "raw.githubusercontent.com") {
+		t.Fatalf("quota page CSP = %q, want same-origin-only connect-src", csp)
+	}
+}
+
+func TestServeDoesNotExposeQuotaAPIAsHTML(t *testing.T) {
+	status, _, _ := Serve(QuotaAPIPath)
+	if status != http.StatusNotFound {
+		t.Fatalf("quota API static status = %d, want 404", status)
+	}
+}
+
 func TestServeUnknownPath404(t *testing.T) {
 	status, _, _ := Serve("/assets/app.js")
 	if status != http.StatusNotFound {

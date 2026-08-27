@@ -693,6 +693,17 @@ func (s *Store) AliasUsageFor(keyID string) (KeyConfig, []AliasUsageEntry, bool)
 	return *key, usage.AliasUsage(*key), true
 }
 
+// FindActiveByAPIKey resolves an enabled downstream key while the plugin is enabled.
+// It is intended for self-service endpoints that must not fall through to another
+// frontend auth provider.
+func (s *Store) FindActiveByAPIKey(raw string) *KeyConfig {
+	key, pluginEnabled := s.findBySecretWhenEnabled(raw)
+	if !pluginEnabled || key == nil || !key.Enabled {
+		return nil
+	}
+	return key
+}
+
 // FindByAPIKey resolves a downstream plain key to policy (copy). Returns nil when unknown.
 func (s *Store) FindByAPIKey(raw string) *KeyConfig {
 	return s.findBySecret(raw)

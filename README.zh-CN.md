@@ -1,14 +1,17 @@
-# cpa-key-policy（中文说明）
+# cpa-key-policy-quota（中文说明）
 
 面向 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的**下游 API Key 策略插件**。
 
 用人话说：你可以给客户发自己的 `cpa_…` 钥匙。每把钥匙只能用你允许的模型，还能限速、限额，并转到 CPA 真实上游（Codex、Claude、openai-compatibility 通道等）。CPA 自带的 `api-keys` 仍可留给管理员；**不要把插件下发的 key 再写进 `api-keys`**，否则会绕过本插件策略。
 
+本仓库是 [`origin652/cpa-plugin-key-policy`](https://github.com/origin652/cpa-plugin-key-policy) 的独立维护 fork。为保持配置兼容，插件 ID 仍为 `cpa-key-policy`；本 fork 增加了使用下游 Key 鉴权的 Codex 配额自助页。
+
 | | |
-|---|---|
-| **仓库** | [origin652/cpa-plugin-key-policy](https://github.com/origin652/cpa-plugin-key-policy) |
+| --- | --- |
+| **仓库** | [ErzerLP/cpa-key-policy-quota](https://github.com/ErzerLP/cpa-key-policy-quota) |
+| **上游** | [origin652/cpa-plugin-key-policy](https://github.com/origin652/cpa-plugin-key-policy) |
 | **协议** | MIT |
-| **安装** | [CLIProxyAPI 插件商店](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store) 或自行编译 |
+| **安装** | 目前需自行编译，本 fork 尚未进入 CLIProxyAPI 插件商店 |
 | **English** | [README.md](./README.md) |
 
 ---
@@ -20,7 +23,8 @@
 3. **做限制** — 单 key 的 RPM、可选每日/每周美元额度，按 token 或按次计费。  
 4. **凭证分档 / 归类** — 请求可以钉死在 Codex free/team 等内置档，或你自定义的归类组，**不会串到别的凭证文件**。  
 5. **多目标别名** — 一个别名挂多个后端（优先 或 轮询）。  
-6. **网页管理** — 在 CPA 里管 key、全局别名、凭证归类。  
+6. **网页管理** — 在 CPA 里管 Key、全局别名、凭证归类。
+7. **Codex 配额自助查询** — 下游 Key 只能查看其唯一绑定凭证的 5 小时/周额度与 Reset Bank 汇总。
 
 ---
 
@@ -40,7 +44,7 @@
 可复用的名字，例如 `fast`，展开成一条或多条 **目标**：
 
 | 字段 | 含义 |
-|------|------|
+| ------ | ------ |
 | `provider` | CPA 提供商标识（`codex`、`claude`，或 openai-compatibility 的 **name**，如 `cerebras`） |
 | `target_model` | 上游真实模型 id |
 | `group` | 可选，限制用哪一类凭证（见下节） |
@@ -78,12 +82,13 @@ CPA 里配置的兼容通道，映射时 `provider` 填通道 **name**。插件�
 ## 插件能力一览
 
 | 钩子 | 作用 |
-|------|------|
+| ------ | ------ |
 | 前端鉴权 | 识别插件 key；校验别名、RPM、额度；写入路由与 group 元数据 |
 | 模型路由 | 别名 → provider + 目标模型 |
 | 调度 | 有 group 时按档位 / `classify:` 过滤凭证 |
 | 响应拦截 | 非流式 JSON：把顶层 `model` 改回别名 |
 | 用量 | token / 按次计费写入 state |
+| 配额自助查询 | 下游 Key 鉴权、唯一 `classify:` 凭证绑定、脱敏的 Codex 配额与 Reset Bank 汇总 |
 | 管理 API + 内嵌网页 | Key、别名、归类、状态 |
 
 ---
@@ -141,11 +146,45 @@ http://<你的-cpa-主机>:<api端口>/v0/resource/plugins/cpa-key-policy/index.
 用 CPA **管理密钥**登录（`remote-management.secret-key` 或管理密码）。密钥只放在内存，不写 `localStorage`；刷新页面需重新登录。
 
 | 区域 | 用途 |
-|------|------|
+| ------ | ------ |
 | Keys | 创建/编辑/轮换/删除 key；绑模型或别名；RPM 与额度 |
 | 映射 → 别名 | 全局多目标别名、调度方式、定价 |
 | 映射 → 凭证归类 | 自定义分组规则与命中预览 |
 | 选模型 | 提供商目录；内置档 / **自定义 · …** 子组 |
+
+## Codex 配额自助页
+
+用户无需 CPA 管理密钥，直接访问：
+
+```text
+http://<你的-cpa-主机>:<api端口>/v0/resource/plugins/cpa-key-policy/quota.html
+```
+
+用户输入插件签发的 `cpa_…` Key。浏览器只会把它放进固定同源接口的 `Authorization: Bearer` 请求头；Key 仅保存在 React 内存中，不写 `localStorage` 或 `sessionStorage`。
+
+```text
+GET /v0/resource/plugins/cpa-key-policy/quota/api
+Authorization: Bearer cpa_…
+```
+
+Key 必须同时满足：
+
+- 至少有一个实际生效的 Codex 目标；
+- 所有实际生效的 Codex 目标都使用同一个自定义 `classify:<组名>`；
+- 该归类组只匹配一个已启用且当前可用的 Codex auth-file 凭证。
+
+例如：
+
+```text
+归类规则：filename ^codex-user-a\.json$ -> 组 user-a
+Key 目标： provider codex, group classify:user-a
+```
+
+匹配零个或多个凭证、使用 `team` 等内置档位、或者 Codex 目标未分组时都会拒绝查询，也不会回退到其他凭证。
+
+返回内容经过脱敏，只包含套餐、可用状态、识别出的 5 小时/周窗口、重置时间以及 Reset Bank 汇总。不会返回凭证文件名、邮箱、`auth_index`、账户 ID、access token、ID token 或管理密钥。`total_earned_count` 表示 Reset Bank 累计发放次数，**不能**当作已经成功使用的重置次数。
+
+该功能要求 CLIProxyAPI 插件宿主提供 `host.auth.list`、`host.auth.get` 和 `host.http.do` 回调。
 
 不重编 `.so` 时开发前端：
 
@@ -209,7 +248,7 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/aliases" \
 ## 客户端请求行为
 
 | 情况 | 结果 |
-|------|------|
+| ------ | ------ |
 | 认识的 key + 允许的别名 | 鉴权通过 → 路由 → 可选 group 过滤 → 上游 |
 | 不允许的模型名 | 鉴权失败 |
 | 超 RPM / 额度 | 拒绝 |
@@ -222,7 +261,6 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/aliases" \
 
 每 key 的 `allow_models_endpoint` 是**开关**：拒绝（401）或看**全局完整列表**。主端口无法按插件 key 过滤列表。
 
-
 ---
 
 ## 上手清单
@@ -232,9 +270,10 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/aliases" \
 3. 用管理密钥打开网页 UI。  
 4. （可选）配置**凭证归类**规则。  
 5. 建**别名**（多目标/定价）和/或给 key 勾选模型（含档位或「自定义 · …」）。  
-6. 创建 key，保存一次性 `plain_key`，发给客户。  
-7. 客户：OpenAI 兼容 base URL = CPA；`Bearer cpa_…`；`model` = 别名。  
-8. openai-compat 通道务必声明 models，否则会「无 auth」。
+6. 创建 Key，保存一次性 `plain_key`，发给客户。
+7. 如需配额自助页，将该 Key 的全部 Codex 目标绑定到唯一的 `classify:` 组，并提供 `/quota.html` 地址。
+8. 客户：OpenAI 兼容 base URL = CPA；`Bearer cpa_…`；`model` = 别名。
+9. openai-compat 通道务必声明 models，否则会「无 auth」。
 
 ---
 
@@ -242,6 +281,5 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/aliases" \
 
 ```bash
 go test ./...
-cd web && npm test && npm run build
+cd web && npm run typecheck && npm test && npm run build
 ```
-

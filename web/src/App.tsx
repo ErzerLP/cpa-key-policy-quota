@@ -9,6 +9,7 @@ import KeyEdit from "./pages/KeyEdit";
 import KeyUsage from "./pages/KeyUsage";
 import ModelPick from "./pages/ModelPick";
 import Mapping, { AliasEditForm, RuleEditForm } from "./pages/Mapping";
+import SelfQuota from "./pages/SelfQuota";
 
 function useAuthTick() {
   const [, setTick] = useState(0);
@@ -103,7 +104,14 @@ function Shell() {
   );
 }
 
+export function isSelfQuotaPage(pathname: string): boolean {
+  return pathname.replace(/\/+$/, "").endsWith("/quota.html");
+}
+
 export default function App() {
+  if (typeof window !== "undefined" && isSelfQuotaPage(window.location.pathname)) {
+    return <SelfQuota />;
+  }
   return (
     <Routes>
       <Route path="/*" element={<Shell />} />

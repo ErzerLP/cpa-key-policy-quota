@@ -1,22 +1,23 @@
 {
   "name": "cpa-key-policy-web",
   "private": true,
-  "version": "0.4.4",
+  "version": "0.5.0",
   "type": "module",
-  "description": "Management UI for the cpa-key-policy CLIProxyAPI plugin.",
+  "description": "Management and self-service Codex quota UI for the cpa-key-policy CLIProxyAPI plugin.",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json"
   },
   "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.26.2",
-    "axios": "^1.7.7"
+    "axios": "^1.7.7",
+    "lucide-react": "^0.468.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

@@ -1,14 +1,17 @@
-# cpa-key-policy
+# cpa-key-policy-quota
 
 Downstream **API key policy** plugin for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
 
 In plain words: you issue your own `cpa_…` keys to clients. Each key only sees the models you allow, can be rate-limited and budget-limited, and is routed to real CPA upstream providers (Codex, Claude, OpenAI-compat channels, etc.). CPA’s own `api-keys` can still exist for admin use — **do not put plugin-issued keys into `api-keys`**, or you bypass this plugin.
 
+This repository is an independently maintained fork of [`origin652/cpa-plugin-key-policy`](https://github.com/origin652/cpa-plugin-key-policy). It keeps the upstream plugin ID (`cpa-key-policy`) for configuration compatibility and adds a downstream-key-authenticated Codex quota page.
+
 | | |
 |---|---|
-| **Repo** | [origin652/cpa-plugin-key-policy](https://github.com/origin652/cpa-plugin-key-policy) |
+| **Repo** | [ErzerLP/cpa-key-policy-quota](https://github.com/ErzerLP/cpa-key-policy-quota) |
+| **Upstream** | [origin652/cpa-plugin-key-policy](https://github.com/origin652/cpa-plugin-key-policy) |
 | **License** | MIT |
-| **Install** | [CLIProxyAPI Plugins Store](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store) or build from source |
+| **Install** | Build from source; the fork is not yet listed in the CLIProxyAPI Plugins Store |
 | **中文说明** | [README.zh-CN.md](./README.zh-CN.md) |
 
 ---
@@ -20,7 +23,8 @@ In plain words: you issue your own `cpa_…` keys to clients. Each key only sees
 3. **Limit** — per-key RPM, optional daily/weekly USD caps, token or per-call billing.
 4. **Isolate credentials (tiers / groups)** — pin a request to Codex free/team/… or to a **custom classify group** so it never lands on the wrong auth file.
 5. **Multi-target aliases** — one alias can point at several backends (priority or round-robin).
-6. **Web UI** — manage keys, global aliases, and credential classification inside CPA.
+6. **Web management UI** — manage keys, global aliases, and credential classification inside CPA.
+7. **Self-service Codex quota** — let a downstream key view only its uniquely bound credential's 5-hour/weekly windows and Reset Bank summary.
 
 ---
 
@@ -86,6 +90,7 @@ Channels under CPA `openai-compatibility` (e.g. a named proxy) use the **channel
 | Scheduler | When `group` is set, filter auth candidates by tier / `classify:` group |
 | Response interceptor | Non-stream JSON: rewrite top-level `model` back to the alias |
 | Usage | Token / per-call billing into the state file |
+| Self-service quota | Downstream-key auth, unique `classify:` credential binding, redacted Codex quota and Reset Bank summary |
 | Management API + embedded Web UI | Keys, aliases, classify rules, status |
 
 ---
@@ -150,6 +155,40 @@ UI areas:
 | Mapping → Aliases | Global multi-target aliases, dispatch, pricing |
 | Mapping → Classification | Custom credential groups + match preview |
 | Model picker | Catalog of providers; tier / **Custom · …** subgroups |
+
+## Self-service Codex quota
+
+Open the user-facing page without a CPA management secret:
+
+```text
+http://<your-cpa-host>:<api-port>/v0/resource/plugins/cpa-key-policy/quota.html
+```
+
+The user enters a plugin-issued `cpa_…` key. The browser sends it only in the `Authorization: Bearer` header to the fixed same-origin endpoint below; it is kept in React memory and is not written to `localStorage` or `sessionStorage`.
+
+```text
+GET /v0/resource/plugins/cpa-key-policy/quota/api
+Authorization: Bearer cpa_…
+```
+
+A key is eligible only when:
+
+- it has at least one effective Codex target;
+- every effective Codex target uses the same custom `classify:<group>` binding;
+- that classify group matches exactly one enabled, available Codex auth-file credential.
+
+For example:
+
+```text
+Classify rule: filename ^codex-user-a\.json$ -> group user-a
+Key target:    provider codex, group classify:user-a
+```
+
+Zero matches, multiple matches, built-in tier groups such as `team`, or ungrouped Codex targets are rejected. The query never falls back to another credential.
+
+The response is redacted and includes only the plan, availability state, recognized 5-hour/weekly windows, reset times, and Reset Bank summary. It never returns the credential filename, email, `auth_index`, account ID, access token, ID token, or management secret. `total_earned_count` means credits granted by Reset Bank; it is **not** a reliable count of successful resets already used.
+
+The feature requires a CLIProxyAPI plugin host that exposes `host.auth.list`, `host.auth.get`, and `host.http.do` callbacks.
 
 Dev UI without rebuilding the `.so`:
 
@@ -235,7 +274,6 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/aliases" \
 
 Per-key `allow_models_endpoint`: **binary** — deny (401) or full global list. CPA cannot filter that list per plugin key on the main port.
 
-
 ---
 
 ## Setup checklist
@@ -245,9 +283,10 @@ Per-key `allow_models_endpoint`: **binary** — deny (401) or full global list. 
 3. Open the Web UI with the management secret.
 4. (Optional) Define **classify rules** if you need custom credential buckets.
 5. Create **aliases** (multi-target / pricing) and/or pick models per key (with tier or Custom group).
-6. Create keys, save the one-time `plain_key`, hand out to clients.
-7. Client: OpenAI-compatible base URL = CPA; `Authorization: Bearer cpa_…`; `model` = alias name.
-8. Ensure openai-compat channels list the models you map; empty model lists → host “no auth” errors.
+6. Create keys, save the one-time `plain_key`, and hand it to clients.
+7. For self-service quota, bind all Codex targets on that key to one unique `classify:` group and share the `/quota.html` URL.
+8. Client: OpenAI-compatible base URL = CPA; `Authorization: Bearer cpa_…`; `model` = alias name.
+9. Ensure openai-compat channels list the models you map; empty model lists → host “no auth” errors.
 
 ---
 
@@ -255,6 +294,5 @@ Per-key `allow_models_endpoint`: **binary** — deny (401) or full global list. 
 
 ```bash
 go test ./...
-cd web && npm test && npm run build
+cd web && npm run typecheck && npm test && npm run build
 ```
-

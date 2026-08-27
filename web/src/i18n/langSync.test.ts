@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  initIsolatedLang,
   initLangSync,
   _resolveLocale,
   _parseStoredLanguage,
@@ -44,6 +45,15 @@ function setEmbedded(embedded: boolean, parentHtml: HTMLElement) {
     get: () => ({ document: { documentElement: parentHtml } }),
   });
 }
+
+describe("isolated locale", () => {
+  it("does not read panel localStorage", () => {
+    const getItem = vi.spyOn(Storage.prototype, "getItem");
+    initIsolatedLang();
+    expect(getItem).not.toHaveBeenCalled();
+    getItem.mockRestore();
+  });
+});
 
 describe("parseStoredLanguage", () => {
   it("parses the zustand persist envelope", () => {

@@ -14,9 +14,15 @@ import (
 )
 
 type App struct {
-	store         *policy.Store
-	classifyMu    sync.RWMutex
-	classifyCache map[string][]string
+	store           *policy.Store
+	classifyMu      sync.RWMutex
+	classifyCache   map[string][]string
+	hostMu          sync.RWMutex
+	host            HostClient
+	quotaMu         sync.Mutex
+	quotaCache      map[string]quotaCacheEntry
+	quotaInflight   map[string]*quotaFlight
+	quotaGeneration uint64
 }
 
 const classifyCacheCapacity = 4096
@@ -24,7 +30,35 @@ const classifyCacheCapacity = 4096
 func NewApp() *App {
 	store := policy.NewStore()
 	_ = store.Configure(policy.DefaultConfig())
-	return &App{store: store, classifyCache: make(map[string][]string)}
+	return &App{
+		store:         store,
+		classifyCache: make(map[string][]string),
+		quotaCache:    make(map[string]quotaCacheEntry),
+		quotaInflight: make(map[string]*quotaFlight),
+	}
+}
+
+// SetHostClient installs the CLIProxyAPI host bridge used by the self-service
+// quota endpoint. It is called once during c-shared plugin initialization.
+func (a *App) SetHostClient(host HostClient) {
+	a.hostMu.Lock()
+	a.host = host
+	a.hostMu.Unlock()
+	a.clearQuotaState()
+}
+
+func (a *App) clearQuotaState() {
+	a.quotaMu.Lock()
+	a.quotaGeneration++
+	a.quotaCache = make(map[string]quotaCacheEntry)
+	a.quotaInflight = make(map[string]*quotaFlight)
+	a.quotaMu.Unlock()
+}
+
+func (a *App) hostClient() HostClient {
+	a.hostMu.RLock()
+	defer a.hostMu.RUnlock()
+	return a.host
 }
 
 func (a *App) HandleMethod(method string, request []byte) ([]byte, error) {
@@ -88,8 +122,10 @@ func (a *App) configure(raw []byte) error {
 	// Register the classify cache clear callback, then clear once for safety.
 	a.store.SetOnClassifyRulesChanged(func() {
 		a.clearClassifyCache()
+		a.clearQuotaState()
 	})
 	a.clearClassifyCache()
+	a.clearQuotaState()
 	a.store.StartUsageFlusher()
 	return nil
 }
@@ -105,8 +141,8 @@ func (a *App) registration() Registration {
 		Metadata: Metadata{
 			Name:             PluginName,
 			Version:          Version,
-			Author:           "cpa-key-policy",
-			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+			Author:           "ErzerLP",
+			GitHubRepository: "https://github.com/ErzerLP/cpa-key-policy-quota",
 			ConfigFields: []ConfigField{
 				{Name: "enabled", Type: "boolean", Description: "Enable or disable this plugin without unloading it."},
 				{Name: "state_file", Type: "string", Description: "JSON state file used for key policy changes made through the Management API."},
@@ -499,6 +535,8 @@ func (a *App) managementRegistration() ManagementRegistrationResponse {
 		},
 		Resources: []ResourceRoute{
 			{Path: web.IndexPath, Menu: "Key Policy", Description: "Web UI for managing downstream CPA key policies (create keys, pick models)."},
+			{Path: web.QuotaPath, Menu: "My Codex Quota", Description: "Self-service Codex quota page authenticated by a downstream key."},
+			{Path: web.QuotaAPIPath, Description: "Downstream-key-authenticated, redacted Codex quota API."},
 		},
 	}
 }
@@ -514,7 +552,11 @@ func (a *App) handleManagement(raw []byte) ([]byte, error) {
 	// the same management.handle method by CPA's ServeResourceHTTP.
 	resourcePrefix := "/v0/resource/plugins/" + PluginID
 	if req.Method == http.MethodGet && strings.HasPrefix(path, resourcePrefix) {
-		status, headers, body := web.Serve(strings.TrimPrefix(path, resourcePrefix))
+		resourcePath := strings.TrimPrefix(path, resourcePrefix)
+		if resourcePath == web.QuotaAPIPath {
+			return OKEnvelope(a.quotaAPI(req))
+		}
+		status, headers, body := web.Serve(resourcePath)
 		return OKEnvelope(ManagementResponse{StatusCode: status, Headers: headers, Body: body})
 	}
 

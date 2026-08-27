@@ -50,10 +50,10 @@ func main() {}
 
 //export cliproxy_plugin_init
 func cliproxy_plugin_init(host *C.cliproxy_host_api, api *C.cliproxy_plugin_api) C.int {
-	_ = host
-	if api == nil {
+	if api == nil || !installHost(unsafe.Pointer(host)) {
 		return 1
 	}
+	app.SetHostClient(cgoHostClient{})
 	api.abi_version = C.uint32_t(plugin.ABIVersion)
 	api.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
 	api.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)

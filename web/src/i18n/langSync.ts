@@ -96,7 +96,7 @@ function resolveLocale(): Locale {
   } else {
     const own = document.documentElement.getAttribute("lang");
     if (own && isSupportedLocale(own)) return own as Locale;
-    const nav = typeof navigator !== "undefined" ? navigator.language : "";
+    const nav = typeof navigator === "undefined" ? "" : navigator.language;
     if (nav) {
       const lower = nav.toLowerCase();
       if (lower.startsWith("zh-tw") || lower === "zh-hant") return "zh-TW";
@@ -107,6 +107,26 @@ function resolveLocale(): Locale {
   }
   // Final fallback — also matches panel fallbackLng = "zh-CN".
   return "zh-CN";
+}
+
+function resolveIsolatedLocale(): Locale {
+  const nav = typeof navigator === "undefined" ? "" : navigator.language;
+  if (nav) {
+    const lower = nav.toLowerCase();
+    if (lower.startsWith("zh-tw") || lower === "zh-hant") return "zh-TW";
+    if (lower.startsWith("zh")) return "zh-CN";
+    if (lower.startsWith("ru")) return "ru";
+    if (lower.startsWith("en")) return "en";
+  }
+  const own = document.documentElement.getAttribute("lang");
+  if (own && isSupportedLocale(own)) return own as Locale;
+  return "zh-CN";
+}
+
+// Initialize a standalone page without reading or watching panel storage.
+export function initIsolatedLang(): void {
+  const next = resolveIsolatedLocale();
+  if (next !== getLocale()) setLocale(next);
 }
 
 // Apply the resolved locale unless it already is current (avoids spurious

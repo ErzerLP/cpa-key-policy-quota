@@ -194,3 +194,28 @@ export interface ClassifyPreviewResponse {
   groups: Record<string, string[]>; // group name → credential IDs
   group_counts: Record<string, number>; // group name → count
 }
+
+export interface QuotaWindow {
+  kind: "five_hour" | "weekly";
+  used_percent: number;
+  remaining_percent: number;
+  reset_at?: string;
+  limit_window_seconds: number;
+}
+
+export interface QuotaResetBank {
+  status: "available" | "summary" | "unavailable";
+  available_count?: number;
+  total_earned_count?: number;
+  next_expiry?: string;
+}
+
+export interface SelfQuotaResponse {
+  quota: {
+    plan_type?: string;
+    allowed?: boolean;
+    windows: QuotaWindow[];
+    reset_bank: QuotaResetBank;
+    fetched_at: string;
+  };
+}

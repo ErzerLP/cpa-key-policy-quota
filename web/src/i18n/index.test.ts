@@ -17,6 +17,7 @@ describe("translate", () => {
     _resetLocale("zh-CN");
     expect(translate("login.submit")).toBe("登录");
     expect(translate("keys.refresh")).toBe("刷新");
+    expect(translate("selfQuota.title")).toBe("Codex 配额");
   });
 
   it("switches output when setLocale changes the locale", () => {
@@ -24,6 +25,7 @@ describe("translate", () => {
     expect(translate("keys.refresh")).toBe("刷新");
     setLocale("en");
     expect(translate("keys.refresh")).toBe("Refresh");
+    expect(translate("selfQuota.open")).toBe("View quota");
     setLocale("ru");
     expect(translate("keys.refresh")).toBe("Обновить");
   });
