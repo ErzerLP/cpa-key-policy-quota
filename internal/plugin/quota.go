@@ -1,7 +1,6 @@
 package plugin
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -58,7 +57,8 @@ type quotaResetBank struct {
 }
 
 type selfQuotaResponse struct {
-	Quota quotaSnapshot `json:"quota"`
+	Quota        quotaSnapshot `json:"quota"`
+	ResetAllowed bool          `json:"reset_allowed"`
 }
 
 type quotaServiceError struct {
@@ -74,31 +74,18 @@ func quotaErr(status int, code, message string) error {
 }
 
 func (a *App) quotaAPI(req ManagementRequest) ManagementResponse {
-	plain := bearerKey(req.Headers.Get("Authorization"))
-	if plain == "" {
-		return quotaJSONError(http.StatusUnauthorized, "unauthorized", "a valid downstream key is required")
-	}
-	key := a.store.FindActiveByAPIKey(plain)
-	if key == nil {
-		return quotaJSONError(http.StatusUnauthorized, "unauthorized", "a valid downstream key is required")
-	}
-	group, err := policy.QuotaBindingGroup(*key)
-	if err != nil {
-		return quotaJSONError(http.StatusConflict, "quota_binding_invalid", "this key is not bound to one Codex classify group")
-	}
-	host := a.hostClient()
-	if host == nil {
-		return quotaJSONError(http.StatusServiceUnavailable, "quota_host_unavailable", "quota service is not available")
-	}
-	entry, err := a.resolveQuotaCredential(host, group)
+	access, err := a.resolveQuotaAccess(req)
 	if err != nil {
 		return quotaErrorResponse(err)
 	}
-	snapshot, err := a.cachedQuotaSnapshot(host, entry, req.HostCallbackID)
+	snapshot, err := a.cachedQuotaSnapshot(access.host, access.identity, access.credential, req.HostCallbackID)
 	if err != nil {
 		return quotaErrorResponse(err)
 	}
-	return quotaJSON(http.StatusOK, selfQuotaResponse{Quota: snapshot})
+	return quotaJSON(http.StatusOK, selfQuotaResponse{
+		Quota:        snapshot,
+		ResetAllowed: access.allowReset,
+	})
 }
 
 func bearerKey(value string) string {
@@ -146,18 +133,8 @@ func (a *App) resolveQuotaCredential(host HostClient, group string) (HostAuthFil
 	return entry, nil
 }
 
-func (a *App) cachedQuotaSnapshot(host HostClient, entry HostAuthFileEntry, hostCallbackID string) (quotaSnapshot, error) {
+func (a *App) cachedQuotaSnapshot(host HostClient, identity string, creds codexCredential, hostCallbackID string) (quotaSnapshot, error) {
 	now := time.Now().UTC()
-	rawAuth, err := host.GetAuth(entry.AuthIndex)
-	if err != nil {
-		return quotaSnapshot{}, quotaErr(http.StatusBadGateway, "quota_auth_read_failed", "unable to read the bound Codex credential")
-	}
-	creds, err := extractCodexCredential(rawAuth)
-	if err != nil {
-		return quotaSnapshot{}, quotaErr(http.StatusConflict, "quota_credential_incomplete", "the bound Codex credential is incomplete")
-	}
-	accountHash := sha256.Sum256([]byte(creds.accountID))
-	identity := entry.AuthIndex + ":" + fmt.Sprintf("%x", accountHash[:])
 
 	a.quotaMu.Lock()
 	generation := a.quotaGeneration
@@ -207,12 +184,7 @@ func (a *App) cachedQuotaSnapshot(host HostClient, entry HostAuthFileEntry, host
 }
 
 func fetchCodexQuota(host HostClient, creds codexCredential, now time.Time, hostCallbackID string) (quotaSnapshot, error) {
-	headers := map[string][]string{
-		"Authorization":      {"Bearer " + creds.accessToken},
-		"Chatgpt-Account-Id": {creds.accountID},
-		"Accept":             {"application/json"},
-		"User-Agent":         {"codex_cli_rs/0.76.0 (linux; amd64)"},
-	}
+	headers := codexQuotaHeaders(creds)
 	usageResponse, err := host.DoHTTP(HostHTTPRequest{
 		HostCallbackID: hostCallbackID,
 		Method:         http.MethodGet,

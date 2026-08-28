@@ -279,11 +279,11 @@ func TestAppKeysListExposesUsageAndLimits(t *testing.T) {
 	}
 }
 
-func TestAppPatchKeySetsLimits(t *testing.T) {
+func TestAppPatchKeySetsLimitsAndQuotaResetPermission(t *testing.T) {
 	app, _ := configureTestApp(t)
 	f := 1.5
 	patchBody, _ := json.Marshal(map[string]any{
-		"id": "team-a", "daily_limit_usd": f, "weekly_limit_usd": 10.0,
+		"id": "team-a", "daily_limit_usd": f, "weekly_limit_usd": 10.0, "allow_quota_reset": true,
 	})
 	req, _ := json.Marshal(ManagementRequest{
 		Method: http.MethodPatch,
@@ -300,15 +300,20 @@ func TestAppPatchKeySetsLimits(t *testing.T) {
 	}
 	var payload struct {
 		Key struct {
-			DailyLimitUSD  float64 `json:"daily_limit_usd"`
-			WeeklyLimitUSD float64 `json:"weekly_limit_usd"`
+			DailyLimitUSD   float64 `json:"daily_limit_usd"`
+			WeeklyLimitUSD  float64 `json:"weekly_limit_usd"`
+			AllowQuotaReset bool    `json:"allow_quota_reset"`
 		} `json:"key"`
 	}
 	if err := json.Unmarshal(resp.Body, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Key.DailyLimitUSD != 1.5 || payload.Key.WeeklyLimitUSD != 10.0 {
-		t.Fatalf("limits = %+v", payload.Key)
+	if payload.Key.DailyLimitUSD != 1.5 || payload.Key.WeeklyLimitUSD != 10.0 || !payload.Key.AllowQuotaReset {
+		t.Fatalf("patched key = %+v", payload.Key)
+	}
+	keys := app.store.Keys()
+	if len(keys) != 1 || !keys[0].AllowQuotaReset {
+		t.Fatalf("stored reset permission = %+v", keys)
 	}
 }
 

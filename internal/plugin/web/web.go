@@ -20,11 +20,12 @@ const contentType = "text/html; charset=utf-8"
 
 // IndexPath is the resource path (relative to the plugin resource base) for
 // the management UI. QuotaPath serves the same single-file bundle in
-// self-service mode, while QuotaAPIPath is handled by the plugin backend.
+// self-service mode, while the API paths are handled by the plugin backend.
 const (
-	IndexPath    = "/index.html"
-	QuotaPath    = "/quota.html"
-	QuotaAPIPath = "/quota/api"
+	IndexPath         = "/index.html"
+	QuotaPath         = "/quota.html"
+	QuotaAPIPath      = "/quota/api"
+	QuotaResetAPIPath = "/quota/api/reset"
 )
 
 // Serve returns the embedded single-file UI for either browser entry point.

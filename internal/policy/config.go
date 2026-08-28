@@ -49,8 +49,12 @@ type KeyConfig struct {
 	// rewrite the body). So the only per-key control we can enforce at the
 	// plugin layer is the binary choice: 401 (hide the list entirely) or
 	// allow (client sees the full global list). Default false = 401.
-	AllowModelsEndpoint bool    `yaml:"allow_models_endpoint,omitempty" json:"allow_models_endpoint,omitempty"`
-	DailyLimitUSD       float64 `yaml:"daily_limit_usd,omitempty" json:"daily_limit_usd,omitempty"`
+	AllowModelsEndpoint bool `yaml:"allow_models_endpoint,omitempty" json:"allow_models_endpoint,omitempty"`
+	// AllowQuotaReset lets this downstream key consume a Reset Bank credit for
+	// its uniquely bound Codex credential. Default false keeps quota access
+	// read-only until an administrator grants this capability explicitly.
+	AllowQuotaReset bool    `yaml:"allow_quota_reset,omitempty" json:"allow_quota_reset,omitempty"`
+	DailyLimitUSD   float64 `yaml:"daily_limit_usd,omitempty" json:"daily_limit_usd,omitempty"`
 	// WeeklyLimitUSD caps the dollar usage over a rolling 7-day window. 0 = unlimited.
 	WeeklyLimitUSD float64   `yaml:"weekly_limit_usd,omitempty" json:"weekly_limit_usd,omitempty"`
 	CreatedAt      time.Time `yaml:"created_at,omitempty" json:"created_at,omitempty"`

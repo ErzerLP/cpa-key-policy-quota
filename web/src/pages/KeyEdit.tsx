@@ -110,6 +110,7 @@ export default function KeyEdit() {
             daily_limit_usd: v.daily_limit_usd,
             weekly_limit_usd: v.weekly_limit_usd,
             allow_models_endpoint: v.allow_models_endpoint,
+            allow_quota_reset: v.allow_quota_reset,
           });
           nav("/keys");
         }}

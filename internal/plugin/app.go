@@ -14,15 +14,18 @@ import (
 )
 
 type App struct {
-	store           *policy.Store
-	classifyMu      sync.RWMutex
-	classifyCache   map[string][]string
-	hostMu          sync.RWMutex
-	host            HostClient
-	quotaMu         sync.Mutex
-	quotaCache      map[string]quotaCacheEntry
-	quotaInflight   map[string]*quotaFlight
-	quotaGeneration uint64
+	store              *policy.Store
+	classifyMu         sync.RWMutex
+	classifyCache      map[string][]string
+	hostMu             sync.RWMutex
+	host               HostClient
+	quotaMu            sync.Mutex
+	quotaCache         map[string]quotaCacheEntry
+	quotaInflight      map[string]*quotaFlight
+	quotaGeneration    uint64
+	quotaResetMu       sync.Mutex
+	quotaResetAttempts map[string]*quotaResetAttempt
+	quotaResetAccounts map[string]string
 }
 
 const classifyCacheCapacity = 4096
@@ -31,10 +34,12 @@ func NewApp() *App {
 	store := policy.NewStore()
 	_ = store.Configure(policy.DefaultConfig())
 	return &App{
-		store:         store,
-		classifyCache: make(map[string][]string),
-		quotaCache:    make(map[string]quotaCacheEntry),
-		quotaInflight: make(map[string]*quotaFlight),
+		store:              store,
+		classifyCache:      make(map[string][]string),
+		quotaCache:         make(map[string]quotaCacheEntry),
+		quotaInflight:      make(map[string]*quotaFlight),
+		quotaResetAttempts: make(map[string]*quotaResetAttempt),
+		quotaResetAccounts: make(map[string]string),
 	}
 }
 
@@ -537,6 +542,7 @@ func (a *App) managementRegistration() ManagementRegistrationResponse {
 			{Path: web.IndexPath, Menu: "Key Policy", Description: "Web UI for managing downstream CPA key policies (create keys, pick models)."},
 			{Path: web.QuotaPath, Menu: "My Codex Quota", Description: "Self-service Codex quota page authenticated by a downstream key."},
 			{Path: web.QuotaAPIPath, Description: "Downstream-key-authenticated, redacted Codex quota API."},
+			{Path: web.QuotaResetAPIPath, Description: "Downstream-key-authenticated manual Codex weekly quota reset API."},
 		},
 	}
 }
@@ -553,8 +559,11 @@ func (a *App) handleManagement(raw []byte) ([]byte, error) {
 	resourcePrefix := "/v0/resource/plugins/" + PluginID
 	if req.Method == http.MethodGet && strings.HasPrefix(path, resourcePrefix) {
 		resourcePath := strings.TrimPrefix(path, resourcePrefix)
-		if resourcePath == web.QuotaAPIPath {
+		switch resourcePath {
+		case web.QuotaAPIPath:
 			return OKEnvelope(a.quotaAPI(req))
+		case web.QuotaResetAPIPath:
+			return OKEnvelope(a.quotaResetAPI(req))
 		}
 		status, headers, body := web.Serve(resourcePath)
 		return OKEnvelope(ManagementResponse{StatusCode: status, Headers: headers, Body: body})
@@ -612,6 +621,7 @@ type keyWriteRequest struct {
 	DailyLimitUSD       *float64             `json:"daily_limit_usd,omitempty"`
 	WeeklyLimitUSD      *float64             `json:"weekly_limit_usd,omitempty"`
 	AllowModelsEndpoint *bool                `json:"allow_models_endpoint,omitempty"`
+	AllowQuotaReset     *bool                `json:"allow_quota_reset,omitempty"`
 }
 
 type publicKey struct {
@@ -625,6 +635,7 @@ type publicKey struct {
 	DailyLimitUSD       float64              `json:"daily_limit_usd"`
 	WeeklyLimitUSD      float64              `json:"weekly_limit_usd"`
 	AllowModelsEndpoint bool                 `json:"allow_models_endpoint,omitempty"`
+	AllowQuotaReset     bool                 `json:"allow_quota_reset,omitempty"`
 	Usage               policy.UsageSummary  `json:"usage"`
 	CreatedAt           string               `json:"created_at,omitempty"`
 	UpdatedAt           string               `json:"updated_at,omitempty"`
@@ -677,6 +688,7 @@ func (a *App) createKey(body []byte) ManagementResponse {
 		DailyLimitUSD:       applyFloat64(req.DailyLimitUSD, 0),
 		WeeklyLimitUSD:      applyFloat64(req.WeeklyLimitUSD, 0),
 		AllowModelsEndpoint: applyBool(req.AllowModelsEndpoint, false),
+		AllowQuotaReset:     applyBool(req.AllowQuotaReset, false),
 	}
 	if err := a.store.UpsertKey(item, true); err != nil {
 		return jsonError(http.StatusBadRequest, "invalid_policy", err.Error())
@@ -727,6 +739,9 @@ func (a *App) patchKey(body []byte) ManagementResponse {
 	}
 	if req.AllowModelsEndpoint != nil {
 		current.AllowModelsEndpoint = *req.AllowModelsEndpoint
+	}
+	if req.AllowQuotaReset != nil {
+		current.AllowQuotaReset = *req.AllowQuotaReset
 	}
 	if req.Models != nil {
 		current.Models = req.Models
@@ -847,6 +862,7 @@ func (a *App) publicKeyFromConfig(key policy.KeyConfig) publicKey {
 		DailyLimitUSD:       key.DailyLimitUSD,
 		WeeklyLimitUSD:      key.WeeklyLimitUSD,
 		AllowModelsEndpoint: key.AllowModelsEndpoint,
+		AllowQuotaReset:     key.AllowQuotaReset,
 		Usage:               a.store.UsageSummaryFor(key),
 	}
 	if !key.CreatedAt.IsZero() {

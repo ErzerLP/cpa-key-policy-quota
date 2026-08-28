@@ -58,6 +58,8 @@ export interface KeyPublic {
   weekly_limit_usd: number;
   // Per-key override for GET /v1/models (see KeyFormValues).
   allow_models_endpoint?: boolean;
+  // Administrator-controlled permission for self-service weekly quota resets.
+  allow_quota_reset?: boolean;
   usage: UsageSummary;
   created_at?: string;
   updated_at?: string;
@@ -74,6 +76,7 @@ export interface KeyWriteRequest {
   daily_limit_usd?: number;
   weekly_limit_usd?: number;
   allow_models_endpoint?: boolean;
+  allow_quota_reset?: boolean;
 }
 
 export interface CreateKeyResponse {
@@ -218,4 +221,14 @@ export interface SelfQuotaResponse {
     reset_bank: QuotaResetBank;
     fetched_at: string;
   };
+  reset_allowed: boolean;
+}
+
+export interface QuotaResetReceipt {
+  code: "reset" | "already_redeemed";
+  windows_reset: number;
+}
+
+export interface SelfQuotaResetResponse {
+  reset: QuotaResetReceipt;
 }

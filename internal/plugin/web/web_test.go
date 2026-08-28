@@ -46,10 +46,12 @@ func TestServeQuotaPageUsesStrictSecurityHeaders(t *testing.T) {
 	}
 }
 
-func TestServeDoesNotExposeQuotaAPIAsHTML(t *testing.T) {
-	status, _, _ := Serve(QuotaAPIPath)
-	if status != http.StatusNotFound {
-		t.Fatalf("quota API static status = %d, want 404", status)
+func TestServeDoesNotExposeQuotaAPIsAsHTML(t *testing.T) {
+	for _, path := range []string{QuotaAPIPath, QuotaResetAPIPath} {
+		status, _, _ := Serve(path)
+		if status != http.StatusNotFound {
+			t.Fatalf("quota API %s static status = %d, want 404", path, status)
+		}
 	}
 }
 

@@ -24,7 +24,7 @@ This repository is an independently maintained fork of [`origin652/cpa-plugin-ke
 4. **Isolate credentials (tiers / groups)** — pin a request to Codex free/team/… or to a **custom classify group** so it never lands on the wrong auth file.
 5. **Multi-target aliases** — one alias can point at several backends (priority or round-robin).
 6. **Web management UI** — manage keys, global aliases, and credential classification inside CPA.
-7. **Self-service Codex quota** — let a downstream key view only its uniquely bound credential's 5-hour/weekly windows and Reset Bank summary.
+7. **Self-service Codex quota** — let a downstream key view only its uniquely bound credential's 5-hour/weekly windows and Reset Bank summary; administrators may separately authorize manual weekly resets per key.
 
 ---
 
@@ -38,6 +38,7 @@ A plugin-owned secret (`cpa_…`). Authenticated only by this plugin. Holds:
 - RPM
 - optional daily / weekly dollar limits
 - optional `allow_models_endpoint` (see below)
+- optional administrator-only `allow_quota_reset` capability (default `false`)
 
 ### Alias (global mapping table)
 
@@ -90,7 +91,7 @@ Channels under CPA `openai-compatibility` (e.g. a named proxy) use the **channel
 | Scheduler | When `group` is set, filter auth candidates by tier / `classify:` group |
 | Response interceptor | Non-stream JSON: rewrite top-level `model` back to the alias |
 | Usage | Token / per-call billing into the state file |
-| Self-service quota | Downstream-key auth, unique `classify:` credential binding, redacted Codex quota and Reset Bank summary |
+| Self-service quota | Downstream-key auth, unique `classify:` credential binding, redacted Codex quota and Reset Bank summary, separately authorized weekly reset |
 | Management API + embedded Web UI | Keys, aliases, classify rules, status |
 
 ---
@@ -186,7 +187,20 @@ Key target:    provider codex, group classify:user-a
 
 Zero matches, multiple matches, built-in tier groups such as `team`, or ungrouped Codex targets are rejected. The query never falls back to another credential.
 
-The response is redacted and includes only the plan, availability state, recognized 5-hour/weekly windows, reset times, and Reset Bank summary. It never returns the credential filename, email, `auth_index`, account ID, access token, ID token, or management secret. `total_earned_count` means credits granted by Reset Bank; it is **not** a reliable count of successful resets already used.
+The response is redacted and includes only the plan, availability state, recognized 5-hour/weekly windows, reset times, Reset Bank summary, and the boolean reset capability for that downstream key. It never returns raw auth JSON, the credential filename, email, `auth_index`, account ID, access token, refresh token, ID token, or management secret. `total_earned_count` means credits granted by Reset Bank; it is **not** a reliable count of successful resets already used.
+
+Quota viewing does not grant quota-reset permission. An administrator must explicitly enable **Allow weekly quota reset** for each key in the key form, or set `"allow_quota_reset": true` through the management API. The field defaults to `false`, including for keys loaded from older state files. A reset-disabled key receives `403 quota_reset_forbidden` before the plugin lists or reads any bound credential.
+
+When both the administrator permission and an available Reset Bank credit are present, the page can manually reset the weekly quota. Current CLIProxyAPI resource routes accept only `GET`, so the compatibility endpoint requires both an explicit confirmation header and an idempotency key; opening or prefetching the URL cannot trigger a reset.
+
+```text
+GET /v0/resource/plugins/cpa-key-policy/quota/api/reset
+Authorization: Bearer cpa_…
+X-CPA-Quota-Reset-Confirm: reset-weekly-quota
+Idempotency-Key: <unique 16-128 character request id>
+```
+
+The backend revalidates the key-to-credential binding, selects the earliest-expiring usable credit, permits only one in-flight reset per bound account, and reuses a deterministic upstream `redeem_request_id` for duplicate requests. A successful reset clears the quota cache; Codex may still take about one minute to publish the updated weekly window.
 
 The feature requires a CLIProxyAPI plugin host that exposes `host.auth.list`, `host.auth.get`, and `host.http.do` callbacks.
 
@@ -233,6 +247,7 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/keys" \
     "id": "team-a",
     "name": "Team A",
     "rpm": 60,
+    "allow_quota_reset": false,
     "models": [
       {"alias":"fast","provider":"codex","target_model":"gpt-5.4-mini","group":"free"}
     ]

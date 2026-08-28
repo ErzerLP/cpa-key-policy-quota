@@ -20,6 +20,8 @@ plugins:
           key_hash: "sha256:replace-with-hash"
           key_preview: "cpa_abc...xyz"
           rpm: 60
+          # Viewing quota stays available; weekly reset is administrator-only.
+          allow_quota_reset: false
           # Either bind models directly…
           models:
             - alias: "fast"

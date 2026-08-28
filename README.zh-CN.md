@@ -24,7 +24,7 @@
 4. **凭证分档 / 归类** — 请求可以钉死在 Codex free/team 等内置档，或你自定义的归类组，**不会串到别的凭证文件**。  
 5. **多目标别名** — 一个别名挂多个后端（优先 或 轮询）。  
 6. **网页管理** — 在 CPA 里管 Key、全局别名、凭证归类。
-7. **Codex 配额自助查询** — 下游 Key 只能查看其唯一绑定凭证的 5 小时/周额度与 Reset Bank 汇总。
+7. **Codex 配额自助查询** — 下游 Key 只能查看其唯一绑定凭证的 5 小时/周额度与 Reset Bank 汇总；管理员可再逐 Key 单独授权手动重置。
 
 ---
 
@@ -38,6 +38,7 @@
 - RPM
 - 每日 / 每周美元上限（可选）
 - 是否允许主端口访问 `/v1/models`（见下文）
+- 是否由管理员单独授权手动重置周额度（`allow_quota_reset`，默认关闭）
 
 ### 别名（全局映射表）
 
@@ -88,7 +89,7 @@ CPA 里配置的兼容通道，映射时 `provider` 填通道 **name**。插件�
 | 调度 | 有 group 时按档位 / `classify:` 过滤凭证 |
 | 响应拦截 | 非流式 JSON：把顶层 `model` 改回别名 |
 | 用量 | token / 按次计费写入 state |
-| 配额自助查询 | 下游 Key 鉴权、唯一 `classify:` 凭证绑定、脱敏的 Codex 配额与 Reset Bank 汇总 |
+| 配额自助查询 | 下游 Key 鉴权、唯一 `classify:` 凭证绑定、脱敏的 Codex 配额与 Reset Bank 汇总、单独授权的周额度重置 |
 | 管理 API + 内嵌网页 | Key、别名、归类、状态 |
 
 ---
@@ -182,7 +183,20 @@ Key 目标： provider codex, group classify:user-a
 
 匹配零个或多个凭证、使用 `team` 等内置档位、或者 Codex 目标未分组时都会拒绝查询，也不会回退到其他凭证。
 
-返回内容经过脱敏，只包含套餐、可用状态、识别出的 5 小时/周窗口、重置时间以及 Reset Bank 汇总。不会返回凭证文件名、邮箱、`auth_index`、账户 ID、access token、ID token 或管理密钥。`total_earned_count` 表示 Reset Bank 累计发放次数，**不能**当作已经成功使用的重置次数。
+返回内容经过脱敏，只包含套餐、可用状态、识别出的 5 小时/周窗口、重置时间、Reset Bank 汇总，以及该下游 Key 是否获准重置的布尔能力位。不会返回 raw auth JSON、凭证文件名、邮箱、`auth_index`、账户 ID、access token、refresh token、ID token 或管理密钥。`total_earned_count` 表示 Reset Bank 累计发放次数，**不能**当作已经成功使用的重置次数。
+
+查看额度不自动获得重置权限。管理员必须在 Key 编辑表单中为每一把 Key 单独开启“允许重置每周额度”，或通过管理 API 设置 `"allow_quota_reset": true`。该字段默认是 `false`，旧状态文件中的 Key 也默认无权重置。未授权 Key 会在插件列出或读取绑定凭证之前直接收到 `403 quota_reset_forbidden`。
+
+只有管理员已授权且 Reset Bank 存在可用次数时，页面才可手动重置每周额度。当前 CLIProxyAPI 的插件资源路由只接受 `GET`，因此兼容端点强制要求确认头和幂等 Key；直接打开或浏览器预取该 URL 不会触发重置。
+
+```text
+GET /v0/resource/plugins/cpa-key-policy/quota/api/reset
+Authorization: Bearer cpa_…
+X-CPA-Quota-Reset-Confirm: reset-weekly-quota
+Idempotency-Key: <每次操作唯一的 16-128 字符请求 ID>
+```
+
+后端会重新验证 Key 到凭证的绑定，优先消费最早到期的可用次数，同一绑定账户同时只允许一条重置请求，并为重复请求复用确定性的上游 `redeem_request_id`。成功后会清空额度缓存；Codex 的每周窗口可能仍需约 1 分钟才会更新。
 
 该功能要求 CLIProxyAPI 插件宿主提供 `host.auth.list`、`host.auth.get` 和 `host.http.do` 回调。
 
@@ -220,6 +234,7 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/keys" \
     "id": "team-a",
     "name": "Team A",
     "rpm": 60,
+    "allow_quota_reset": false,
     "models": [
       {"alias":"fast","provider":"codex","target_model":"gpt-5.4-mini","group":"free"}
     ]
